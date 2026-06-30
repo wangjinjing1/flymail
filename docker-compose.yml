@@ -1,9 +1,6 @@
 services:
   flymail-app:
-    image: flymail
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: wangjinjing/flymail:latest
     container_name: flymail
     restart: unless-stopped
     env_file:
@@ -17,4 +14,4 @@ services:
       FLYMAIL_UI_DIR: /app/frontend-dist
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
     volumes:
-      - ./data:/app/data
+      - ${FLYMAIL_DATA_PATH:-./data}:/app/data

@@ -60,7 +60,7 @@ DATABASE_URL=mysql://flymail:change_me@127.0.0.1:3306/flymail?charset=utf8mb4
 
 当前仓库自带 `docker-compose.yml`，会：
 
-- 直接拉取 Docker Hub 镜像 `wangjinjing1/flymail:latest`
+- 直接拉取 Docker Hub 镜像 `wangjinjing/flymail:latest`
 - 读取根目录 `.env`
 - 将宿主机 `APP_PORT` 映射到容器 `8080`
 - 将 `${FLYMAIL_DATA_PATH:-./data}` 映射到容器内 `/app/data`
@@ -101,7 +101,7 @@ docker compose down
 本地构建：
 
 ```bash
-docker build -t wangjinjing1/flymail:latest -t wangjinjing1/flymail:1.0.0 .
+docker build -t wangjinjing/flymail:latest -t wangjinjing/flymail:1.0.0 .
 ```
 
 登录 Docker Hub：
@@ -113,8 +113,8 @@ docker login
 推送镜像：
 
 ```bash
-docker push wangjinjing1/flymail:latest
-docker push wangjinjing1/flymail:1.0.0
+docker push wangjinjing/flymail:latest
+docker push wangjinjing/flymail:1.0.0
 ```
 
 当前 `docker-compose.yml` 已默认使用线上拉取镜像模式，服务器上不需要本地构建。

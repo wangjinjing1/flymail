@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build output
+dist/
+build/
+coverage/
+frontend/dist/
+frontend/.vite/
+
+# Local runtime data
+backend/data/
+backend/ui/
+data/
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# IDE / editor
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test / tool cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Packaging artifacts
+*.fpk
+
+# Generated release assets
+flymail/app/server/flymail-server
+flymail/app/ui/assets/
+flymail/app/ui/guide/
+flymail/app/ui/index.html
+flymail/app/ui/*.js
+flymail/app/ui/*.css
+flymail/app/ui/*.svg
+flymail/app/ui/*.png

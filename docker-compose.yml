@@ -1,0 +1,20 @@
+services:
+  flymail-app:
+    image: flymail
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flymail
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+      FLYMAIL_DATA_DIR: /app/data
+      FLYMAIL_UI_DIR: /app/frontend-dist
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    volumes:
+      - ./data:/app/data

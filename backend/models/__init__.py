@@ -23,6 +23,7 @@ class Account(BaseModel):
     remark: str = ""
     group_name: str = ""
     hide_email: bool = False
+    poll_interval_seconds: int = 10
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -42,6 +43,22 @@ class CachedMessage(BaseModel):
     has_attachments: bool = False
     body_text: str = ""
     body_html: str = ""
+    storage_path: str = ""
+    cached_at: float = 0.0
+
+
+class CachedAttachment(BaseModel):
+    account_id: str
+    user_uid: str
+    uid: int
+    folder: str
+    part_number: int
+    filename: str = ""
+    content_type: str = ""
+    size: int = 0
+    content_id: str = ""
+    is_inline: bool = False
+    local_path: str = ""
     cached_at: float = 0.0
 
 

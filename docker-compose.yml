@@ -13,5 +13,9 @@ services:
       FLYMAIL_DATA_DIR: /app/data
       FLYMAIL_UI_DIR: /app/frontend-dist
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      FLYMAIL_HTTP_PROXY: ${FLYMAIL_HTTP_PROXY:-}
+      FLYMAIL_HTTPS_PROXY: ${FLYMAIL_HTTPS_PROXY:-}
+      FLYMAIL_ALL_PROXY: ${FLYMAIL_ALL_PROXY:-}
+      FLYMAIL_NO_PROXY: ${FLYMAIL_NO_PROXY:-127.0.0.1,localhost}
     volumes:
       - ${FLYMAIL_DATA_PATH:-./data}:/app/data

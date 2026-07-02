@@ -11,17 +11,19 @@
         </div>
       </div>
 
-      <nav class="nav">
-        <button
-          v-for="item in navItems"
-          :key="item.key"
-          class="nav-item"
-          :class="{ active: currentView === item.key }"
-          @click="currentView = item.key"
-        >
-          {{ item.label }}
-        </button>
-      </nav>
+      <div class="nav-scroll">
+        <nav class="nav">
+          <button
+            v-for="item in navItems"
+            :key="item.key"
+            class="nav-item"
+            :class="{ active: currentView === item.key }"
+            @click="currentView = item.key"
+          >
+            {{ item.label }}
+          </button>
+        </nav>
+      </div>
     </aside>
 
     <div class="main">
@@ -36,10 +38,13 @@
         </div>
       </header>
 
-      <main class="content">
-        <UnifiedInbox v-if="currentView === 'unified'" />
-        <MailList v-else-if="currentView === 'mail'" />
-        <ComposeEmail v-else-if="currentView === 'compose'" @sent="currentView = 'mail'" @discard="currentView = 'mail'" />
+      <main class="content" :class="`content-${currentView}`">
+        <ComposeEmail v-if="currentView === 'compose'" @sent="handleComposeSent" @discard="currentView = 'mail'" />
+        <template v-else-if="currentView === 'mail'">
+          <KeepAlive>
+            <MailList />
+          </KeepAlive>
+        </template>
         <AccountList v-else-if="currentView === 'accounts'" />
         <HistorySync v-else-if="currentView === 'history-sync'" />
         <UserManagement v-else-if="currentView === 'users' && isAdmin" />
@@ -55,6 +60,25 @@
         </div>
       </transition-group>
     </div>
+
+    <div v-if="uiStore.confirmVisible" class="confirm-overlay" @click.self="uiStore.confirmCancel()">
+      <div class="confirm-dialog">
+        <h3 class="confirm-title">{{ uiStore.confirmOptions.title }}</h3>
+        <p class="confirm-message">{{ uiStore.confirmOptions.message }}</p>
+        <div class="confirm-actions">
+          <button class="btn btn-secondary" @click="uiStore.confirmCancel()">
+            {{ uiStore.confirmOptions.cancelText || '取消' }}
+          </button>
+          <button
+            class="btn"
+            :class="uiStore.confirmOptions.danger ? 'btn-danger' : 'btn-primary'"
+            @click="uiStore.confirmOk()"
+          >
+            {{ uiStore.confirmOptions.confirmText || '确定' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -67,7 +91,6 @@ import HistorySync from './views/HistorySync.vue';
 import LoginView from './views/LoginView.vue';
 import MailList from './views/MailList.vue';
 import Settings from './views/Settings.vue';
-import UnifiedInbox from './views/UnifiedInbox.vue';
 import UserManagement from './views/UserManagement.vue';
 import { useMailStore } from './stores/mail';
 import { useUIStore } from './stores/ui';
@@ -78,22 +101,21 @@ const uiStore = useUIStore();
 
 const currentUser = ref<any>(null);
 const authReady = ref(false);
-const currentView = ref(sessionStorage.getItem('flymail_view') || 'unified');
+const currentView = ref(sessionStorage.getItem('flymail_view') || 'compose');
 
 const isAdmin = computed(() => currentUser.value?.role === 'admin');
 
 const navItems = computed(() => {
   const items = [
-    { key: 'unified', label: '聚合' },
-    { key: 'mail', label: '邮件' },
     { key: 'compose', label: '写邮件' },
-    { key: 'accounts', label: '账号' },
+    { key: 'mail', label: '邮件' },
+    { key: 'accounts', label: '账号管理' },
     { key: 'history-sync', label: '历史同步' },
     { key: 'settings', label: '设置' },
     { key: 'about', label: '关于' },
   ];
   if (isAdmin.value) {
-    items.splice(5, 0, { key: 'users', label: '用户管理' });
+    items.splice(4, 0, { key: 'users', label: '用户管理' });
   }
   return items;
 });
@@ -104,7 +126,6 @@ async function bootstrapAfterLogin() {
   currentUser.value = await api.get('/auth/me');
   await mailStore.fetchUser();
   await mailStore.loadAccounts();
-  await mailStore.loadUnifiedSettings();
   await mailStore.loadNotifications();
 }
 
@@ -121,6 +142,13 @@ async function checkAuth() {
 async function handleLoginSuccess() {
   await bootstrapAfterLogin();
   authReady.value = true;
+}
+
+function handleComposeSent(payload?: { sentFolder?: string }) {
+  if (payload?.sentFolder) {
+    mailStore.setFolder(payload.sentFolder);
+  }
+  currentView.value = 'mail';
 }
 
 async function logout() {
@@ -151,16 +179,20 @@ watch(currentView, (value) => {
 
 <style scoped>
 .app-shell {
+  height: 100vh;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
   background: #f5f7fb;
+  overflow: hidden;
 }
 
 .sidebar {
   padding: 24px 18px;
   background: #fff;
   border-right: 1px solid #e8edf3;
+  overflow-y: auto;
+  min-width: 0;
 }
 
 .brand {
@@ -183,6 +215,10 @@ watch(currentView, (value) => {
 .brand-subtitle {
   color: #64748b;
   font-size: 13px;
+}
+
+.nav-scroll {
+  min-width: 0;
 }
 
 .nav {
@@ -209,6 +245,10 @@ watch(currentView, (value) => {
 
 .main {
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
@@ -234,7 +274,27 @@ watch(currentView, (value) => {
 }
 
 .content {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  display: flex;
   padding: 20px 28px 28px;
+  overflow: hidden;
+}
+
+.content-mail {
+  padding: 20px 28px 28px;
+}
+
+.content-compose,
+.content-accounts,
+.content-history-sync,
+.content-users,
+.content-settings,
+.content-about {
+  padding: 0;
+  width: 100%;
 }
 
 .btn {
@@ -250,6 +310,16 @@ watch(currentView, (value) => {
   color: #0f172a;
 }
 
+.btn-primary {
+  background: #1677ff;
+  color: #fff;
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: #fff;
+}
+
 .toast-container {
   position: fixed;
   right: 20px;
@@ -257,7 +327,7 @@ watch(currentView, (value) => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  z-index: 30;
+  z-index: 10000;
 }
 
 .toast-item {
@@ -284,20 +354,152 @@ watch(currentView, (value) => {
   background: #2563eb;
 }
 
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.36);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9000;
+  padding: 20px;
+}
+
+.confirm-dialog {
+  width: min(100%, 420px);
+  background: #fff;
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
+}
+
+.confirm-title {
+  margin: 0;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.confirm-message {
+  margin: 10px 0 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 @media (max-width: 960px) {
   .app-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    height: 100dvh;
+    overflow-y: auto;
   }
 
   .sidebar {
     border-right: none;
     border-bottom: 1px solid #e8edf3;
+    padding: 18px 16px 14px;
+    overflow: visible;
+  }
+
+  .brand {
+    margin-bottom: 16px;
+  }
+
+  .brand-logo {
+    width: 40px;
+    height: 40px;
+  }
+
+  .brand-name {
+    font-size: 20px;
+  }
+
+  .brand-subtitle {
+    font-size: 12px;
+  }
+
+  .nav-scroll {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-right: 4px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .nav-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav {
+    display: inline-flex;
+    flex-direction: row;
+    gap: 8px;
+    min-width: max-content;
+    padding-bottom: 2px;
+  }
+
+  .nav-item {
+    flex: 0 0 auto;
+    height: 38px;
+    padding: 0 14px;
+    white-space: nowrap;
+    border-radius: 999px;
+    background: #f1f5f9;
+  }
+
+  .nav-item.active {
+    background: #1677ff;
+    color: #fff;
   }
 
   .topbar {
     flex-direction: column;
     align-items: flex-start;
     gap: 14px;
+    padding: 18px 16px 0;
+  }
+
+  .topbar h1 {
+    font-size: 22px;
+  }
+
+  .topbar p {
+    margin-top: 4px;
+    font-size: 14px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .topbar-actions .btn {
+    flex: 0 0 auto;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 9px;
+  }
+
+  .main {
+    overflow: visible;
+  }
+
+  .content {
+    padding: 0 0 calc(16px + env(safe-area-inset-bottom, 0px));
+    overflow: visible;
+    width: 100%;
+  }
+
+  .content-mail {
+    padding: 12px 0 calc(16px + env(safe-area-inset-bottom, 0px));
   }
 }
 </style>

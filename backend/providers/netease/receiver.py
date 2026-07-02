@@ -274,7 +274,7 @@ class NeteaseReceiver(BaseIMAPReceiver):
         uid_set = ",".join(str(u) for u in page_uids)
         status, msg_data = self._conn.uid(
             'FETCH', uid_set,
-            '(FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE)])'
+            '(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE)])'
         )
         if status != "OK":
             return MessageList(messages=[], total=total, unread_total=unread_total, page=page, page_size=page_size)

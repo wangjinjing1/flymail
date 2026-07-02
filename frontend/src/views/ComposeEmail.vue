@@ -161,7 +161,7 @@
             {{ addr }}
             <button class="tag-remove" @click="toList.splice(i, 1)">&times;</button>
           </span>
-          <input v-model="toInput" @keydown.enter.prevent="addRecipient('to')" @keydown.comma.prevent="addRecipient('to')" placeholder="输入邮箱后回车" class="tag-input-field" />
+          <input v-model="toInput" type="email" inputmode="email" enterkeyhint="done" @keydown.enter.prevent="addRecipient('to')" @keyup.enter.prevent="addRecipient('to')" @keydown.comma.prevent="addRecipient('to')" @change="addRecipient('to')" @blur="addRecipient('to')" placeholder="输入邮箱后回车" class="tag-input-field" />
         </div>
       </div>
 
@@ -173,7 +173,7 @@
             {{ addr }}
             <button class="tag-remove" @click="ccList.splice(i, 1)">&times;</button>
           </span>
-          <input v-model="ccInput" @keydown.enter.prevent="addRecipient('cc')" @keydown.comma.prevent="addRecipient('cc')" placeholder="输入邮箱后回车" class="tag-input-field" />
+          <input v-model="ccInput" type="email" inputmode="email" enterkeyhint="done" @keydown.enter.prevent="addRecipient('cc')" @keyup.enter.prevent="addRecipient('cc')" @keydown.comma.prevent="addRecipient('cc')" @change="addRecipient('cc')" @blur="addRecipient('cc')" placeholder="输入邮箱后回车" class="tag-input-field" />
         </div>
       </div>
 
@@ -185,7 +185,7 @@
             {{ addr }}
             <button class="tag-remove" @click="bccList.splice(i, 1)">&times;</button>
           </span>
-          <input v-model="bccInput" @keydown.enter.prevent="addRecipient('bcc')" @keydown.comma.prevent="addRecipient('bcc')" placeholder="输入邮箱后回车" class="tag-input-field" />
+          <input v-model="bccInput" type="email" inputmode="email" enterkeyhint="done" @keydown.enter.prevent="addRecipient('bcc')" @keyup.enter.prevent="addRecipient('bcc')" @keydown.comma.prevent="addRecipient('bcc')" @change="addRecipient('bcc')" @blur="addRecipient('bcc')" placeholder="输入邮箱后回车" class="tag-input-field" />
         </div>
       </div>
 
@@ -328,7 +328,7 @@ import { useMailStore } from '../stores/mail';
 import TiptapEditor from '../components/TiptapEditor.vue';
 
 const emit = defineEmits<{
-  sent: [];
+  sent: [payload?: { sentFolder?: string }];
   discard: [];
 }>();
 
@@ -682,15 +682,26 @@ function addRecipient(field: 'to' | 'cc' | 'bcc') {
   inputRef.value = '';
 }
 
+function commitRecipientInputs() {
+  addRecipient('to');
+  addRecipient('cc');
+  addRecipient('bcc');
+}
+
+function getErrorMessage(e: any) {
+  return e?.error || e?.message || e?.response?.data?.error || '网络错误';
+}
+
 // 发送邮件
 async function sendMail() {
+  commitRecipientInputs();
   if (toList.value.length === 0) {
     showToast('请输入收件人', 'info');
     return;
   }
   sending.value = true;
   try {
-    await api.post('/messages/compose', {
+    const data = await api.post('/messages/compose', {
       account_id: fromAccountId.value,
       to: toList.value,
       cc: ccList.value,
@@ -699,11 +710,11 @@ async function sendMail() {
       body_html: bodyHtml.value,
       attachments: attachments.value.map(a => a.path),
       action: 'send',
-    });
-    showToast('邮件发送成功', 'success');
-    emit('sent');
+    }) as any;
+    showToast('发送成功', 'success');
+    emit('sent', { sentFolder: data?.sent_folder || '' });
   } catch (e: any) {
-    showToast('发送失败: ' + (e.response?.data?.error || e.message), 'error');
+    showToast('发送失败: ' + getErrorMessage(e), 'error');
   } finally {
     sending.value = false;
   }
@@ -724,7 +735,7 @@ async function saveDraft() {
     });
     showToast('草稿已保存', 'success');
   } catch (e: any) {
-    showToast('保存草稿失败: ' + (e.response?.data?.error || e.message), 'error');
+    showToast('保存草稿失败: ' + getErrorMessage(e), 'error');
   } finally {
     savingDraft.value = false;
   }
@@ -764,7 +775,7 @@ async function scheduleMail() {
     scheduleSuccessTime.value = schedulePreview.value;
     showScheduleSuccessModal.value = true;
   } catch (e: any) {
-    showToast('设置定时发送失败: ' + (e.response?.data?.error || e.message), 'error');
+    showToast('设置定时发送失败: ' + getErrorMessage(e), 'error');
   }
 }
 
@@ -831,9 +842,13 @@ function formatSize(bytes: number): string {
 
 <style scoped>
 .compose-page {
+  flex: 1;
+  width: 100%;
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  min-width: 0;
   position: relative;
   background: var(--bg-primary);
 }
@@ -865,10 +880,12 @@ function formatSize(bytes: number): string {
 .compose-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-secondary);
+  min-width: 0;
 }
 
 .toolbar-btn {
@@ -918,6 +935,9 @@ function formatSize(bytes: number): string {
 .compose-form {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
   padding: 0 16px 16px;
   display: flex;
   flex-direction: column;
@@ -929,6 +949,7 @@ function formatSize(bytes: number): string {
   gap: 12px;
   padding: 8px 0;
   border-bottom: 1px solid var(--border-color);
+  min-width: 0;
 }
 
 .form-row label {
@@ -941,6 +962,7 @@ function formatSize(bytes: number): string {
 
 .form-input {
   flex: 1;
+  min-width: 0;
   padding: 6px 10px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -956,6 +978,7 @@ function formatSize(bytes: number): string {
 
 .form-select {
   flex: 1;
+  min-width: 0;
   padding: 6px 10px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -968,6 +991,7 @@ function formatSize(bytes: number): string {
 /* 标签输入 */
 .tag-input {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -1038,6 +1062,7 @@ function formatSize(bytes: number): string {
   flex: 1;
   min-height: 200px;
   overflow: hidden;
+  min-width: 0;
 }
 
 /* 抄送/密送链接 */
@@ -1052,6 +1077,7 @@ function formatSize(bytes: number): string {
 .attachments-section {
   padding: 4px 0;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .attachments-header {
@@ -1430,6 +1456,7 @@ function formatSize(bytes: number): string {
   .compose-toolbar {
     padding: 8px 12px;
     gap: 4px;
+    align-items: stretch;
   }
 
   .toolbar-btn span {
@@ -1440,13 +1467,56 @@ function formatSize(bytes: number): string {
     padding: 8px;
   }
 
+  .toolbar-spacer {
+    display: none;
+  }
+
   .compose-form {
     padding: 0 12px 12px;
   }
 
+  .form-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 0;
+  }
+
   .form-row label {
-    width: 48px;
+    width: 100%;
     font-size: 12px;
+    text-align: left;
+  }
+
+  .form-input,
+  .form-select,
+  .tag-input {
+    width: 100%;
+  }
+
+  .cc-links {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .tag-input-field {
+    min-width: 80px;
+  }
+
+  .attachments-list {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .attachment-item {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .att-name {
+    flex: 1;
+    max-width: none;
+    min-width: 0;
   }
 
   .modal-content {

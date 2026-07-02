@@ -65,13 +65,16 @@ function onLogoError(event: Event) {
   (event.target as HTMLImageElement).style.display = 'none';
 }
 
-const features = ['多邮箱聚合', '实时同步', '自托管隐私', '历史同步', '断点续传', '多用户隔离'];
+const features = ['多邮箱', '实时同步', '自托管隐私', '历史同步', '断点续传', '多用户隔离'];
 const techs = ['Vue 3', 'TypeScript', 'FastAPI', 'MySQL', 'IMAP', 'WebSocket', 'Docker'];
 </script>
 
 <style scoped>
 .about-page {
+  flex: 1;
+  width: 100%;
   height: 100%;
+  min-height: 0;
   overflow-y: auto;
   padding: 24px;
   background: var(--bg-secondary);
@@ -110,6 +113,7 @@ const techs = ['Vue 3', 'TypeScript', 'FastAPI', 'MySQL', 'IMAP', 'WebSocket', '
   display: flex;
   align-items: baseline;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .brand-name {
@@ -193,12 +197,14 @@ const techs = ['Vue 3', 'TypeScript', 'FastAPI', 'MySQL', 'IMAP', 'WebSocket', '
   margin: 0;
   font-size: 14px;
   color: var(--text-secondary);
+  line-height: 1.7;
 }
 
 .repo-link,
 .inline-link {
   color: var(--color-accent);
   text-decoration: none;
+  word-break: break-all;
 }
 
 .repo-link:hover,
@@ -222,6 +228,10 @@ const techs = ['Vue 3', 'TypeScript', 'FastAPI', 'MySQL', 'IMAP', 'WebSocket', '
 
   .about-card {
     padding: 16px;
+  }
+
+  .brand-row {
+    align-items: flex-start;
   }
 
   .brand-logo {

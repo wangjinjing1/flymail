@@ -14,14 +14,18 @@ import time
 from typing import Dict, List
 
 from db import (
+    get_cached_message_detail,
+    upsert_cached_attachments,
     upsert_cached_messages, get_max_cached_uid, get_accounts,
     upsert_folder_stats, get_folder_stats,
     purge_deleted_from_cache, get_cached_count, get_cached_uids,
     get_cached_messages_by_folder, batch_update_is_read,
 )
+from data_paths import coalesce_message_date, normalize_message_date
 from models import CachedMessage, Account
 from providers.base import Message
 from providers.factory import ProviderFactory
+from services.history_sync import _cache_message_assets
 from utils.logger import get_logger
 
 logger = get_logger("cache")
@@ -223,6 +227,47 @@ async def _do_sync(receiver, account: Account, folder: str, force_full: bool = F
         cached = _messages_to_cached(messages, account)
         await upsert_cached_messages(cached)
 
+        detailed_batch = []
+        for message in messages:
+            try:
+                detail = await receiver.fetch_message_detail(str(message.uid), folder=folder)
+            except Exception as e:
+                logger.debug("拉取邮件详情失败，跳过附件缓存: account=%s folder=%s uid=%s error=%s", account.email, folder, message.uid, e)
+                continue
+
+            cached_detail = await get_cached_message_detail(account.id, detail.uid, folder)
+            effective_message_date = coalesce_message_date(detail.date, message.date, (cached_detail or {}).get("date", ""))
+            body_html, storage_path, att_count, inline_count, attachment_records = await _cache_message_assets(
+                receiver, account, folder, detail
+            )
+            detail.body_html = body_html
+
+            detailed_batch.append(
+                CachedMessage(
+                    id=f"{account.id}_{detail.uid}",
+                    account_id=account.id,
+                    user_uid=account.user_uid,
+                    uid=detail.uid,
+                    folder=folder,
+                    subject=detail.subject,
+                    from_addr=detail.from_addr,
+                    to_addr=detail.to_addr,
+                    date=normalize_message_date(detail.date, fallback=effective_message_date),
+                    is_read=detail.is_read,
+                    is_starred=detail.is_starred,
+                    has_attachments=bool(detail.attachments),
+                    body_text=detail.body_text,
+                    body_html=detail.body_html,
+                    storage_path=storage_path,
+                    cached_at=time.time(),
+                )
+            )
+            if attachment_records:
+                await upsert_cached_attachments(attachment_records)
+
+        if detailed_batch:
+            await upsert_cached_messages(detailed_batch)
+
         # 日志中包含已读/未读统计，方便排查问题
         read_count = sum(1 for m in messages if m.is_read)
         logger.info(
@@ -301,6 +346,9 @@ async def _do_sync(receiver, account: Account, folder: str, force_full: bool = F
             except Exception as e:
                 logger.warning("自动补全缓存失败: 账号=%s, 文件夹=%s, 错误=%s", account.email, folder, e)
 
+    if total_count >= 0:
+        await upsert_folder_stats(account.id, folder, total_count, unread_count)
+
     return len(messages) if messages else 0
 
 
@@ -363,8 +411,49 @@ async def sync_missing_messages(account: Account, folder: str) -> int:
                         # 用之前获取的 unseen_uids 校正 is_read
                         for m in messages:
                             m.is_read = m.uid not in unseen_uids
-                        cached = _messages_to_cached(messages, account)
-                        await upsert_cached_messages(cached)
+                        cached_batch = []
+                        for message in messages:
+                            try:
+                                detail = await receiver.fetch_message_detail(str(message.uid), folder=folder)
+                                detail.is_read = message.is_read
+                                cached_detail = await get_cached_message_detail(account.id, detail.uid, folder)
+                                effective_message_date = coalesce_message_date(detail.date, message.date, (cached_detail or {}).get("date", ""))
+                                body_html, storage_path, _att_count, _inline_count, attachment_records = await _cache_message_assets(
+                                    receiver, account, folder, detail
+                                )
+                                detail.body_html = body_html
+                                cached_batch.append(
+                                    CachedMessage(
+                                        id=f"{account.id}_{detail.uid}",
+                                        account_id=account.id,
+                                        user_uid=account.user_uid,
+                                        uid=detail.uid,
+                                        folder=folder,
+                                        subject=detail.subject,
+                                        from_addr=detail.from_addr,
+                                        to_addr=detail.to_addr,
+                                        date=normalize_message_date(detail.date, fallback=effective_message_date),
+                                        is_read=detail.is_read,
+                                        is_starred=detail.is_starred,
+                                        has_attachments=bool(detail.attachments),
+                                        body_text=detail.body_text,
+                                        body_html=detail.body_html,
+                                        storage_path=storage_path,
+                                        cached_at=time.time(),
+                                    )
+                                )
+                                if attachment_records:
+                                    await upsert_cached_attachments(attachment_records)
+                            except Exception as exc:
+                                logger.debug(
+                                    "fill missing detail failed, cache summary only: account=%s folder=%s uid=%s error=%s",
+                                    account.email,
+                                    folder,
+                                    message.uid,
+                                    exc,
+                                )
+                                cached_batch.extend(_messages_to_cached([message], account))
+                        await upsert_cached_messages(cached_batch)
                         total_filled += len(messages)
                 except Exception as e:
                     logger.warning("补全同步批次失败: %s, UIDs=%s, 错误=%s", folder, batch[:5], e)
@@ -398,10 +487,13 @@ def _messages_to_cached(messages: List[Message], account: Account) -> List[Cache
             subject=m.subject,
             from_addr=m.from_addr,
             to_addr=m.to_addr,
-            date=m.date,
+            date=normalize_message_date(m.date),
             is_read=m.is_read,
             is_starred=m.is_starred,
             has_attachments=m.has_attachments,
+            body_text=m.body_text,
+            body_html=m.body_html,
+            storage_path=getattr(m, "storage_path", ""),
             cached_at=time.time(),
         )
         for m in messages

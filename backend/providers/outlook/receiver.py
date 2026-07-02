@@ -373,6 +373,15 @@ class OutlookReceiver(BaseIMAPReceiver):
         result = await asyncio.to_thread(self._fetch_messages_sync, folder, page, page_size)
         return result
 
+    async def search_messages(self, folder: str, keyword: str, page: int = 1, page_size: int = 20) -> MessageList:
+        if not self._conn:
+            raise ConnectionError("Not connected")
+        return await asyncio.to_thread(
+            lambda: self._run_with_reconnect(
+                lambda: self._search_messages_sync(folder, keyword, page, page_size)
+            )
+        )
+
     def _fetch_messages_sync(self, folder: str, page: int, page_size: int) -> MessageList:
         """同步获取邮件列表（批量 UID FETCH 版本）
 
@@ -442,7 +451,7 @@ class OutlookReceiver(BaseIMAPReceiver):
             uid_set = ",".join(str(uid) for uid in batch)
             status, msg_data = self._conn.uid(
                 'FETCH', uid_set,
-                '(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])'
+                '(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])'
             )
             if status == "OK":
                 parsed = self._parse_batch_fetch_response(msg_data, folder)

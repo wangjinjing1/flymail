@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import json
 import re
@@ -7,9 +8,10 @@ from typing import Any, List, Optional
 from urllib.parse import unquote, urlparse
 
 import aiomysql
+import pymysql
 
 from data_paths import ensure_data_dirs
-from models import Account, CachedMessage, Notification, Signature, User
+from models import Account, CachedAttachment, CachedMessage, Notification, Signature, User
 from utils.logger import get_logger
 
 
@@ -18,6 +20,8 @@ logger = get_logger("db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 DB_CONNECT_RETRY_COUNT = 15
 DB_CONNECT_RETRY_DELAY = 2
+DB_MESSAGE_BODY_MAX_BYTES = 1024 * 1024
+DB_EXECUTEMANY_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _parse_database_url(database_url: str) -> dict[str, Any]:
@@ -59,6 +63,12 @@ def _translate_sql(sql: str) -> str:
     translated = translated.replace("is_starred = excluded.is_starred,", "is_starred = VALUES(is_starred),")
     translated = translated.replace("has_attachments = excluded.has_attachments,", "has_attachments = VALUES(has_attachments),")
     translated = translated.replace("cached_at = excluded.cached_at,", "cached_at = VALUES(cached_at),")
+    translated = translated.replace("filename = excluded.filename,", "filename = VALUES(filename),")
+    translated = translated.replace("content_type = excluded.content_type,", "content_type = VALUES(content_type),")
+    translated = translated.replace("size = excluded.size,", "size = VALUES(size),")
+    translated = translated.replace("content_id = excluded.content_id,", "content_id = VALUES(content_id),")
+    translated = translated.replace("is_inline = excluded.is_inline,", "is_inline = VALUES(is_inline),")
+    translated = translated.replace("local_path = excluded.local_path,", "local_path = VALUES(local_path),")
     translated = translated.replace(
         "body_text = COALESCE(excluded.body_text, cached_messages.body_text),",
         "body_text = COALESCE(VALUES(body_text), cached_messages.body_text),",
@@ -66,6 +76,14 @@ def _translate_sql(sql: str) -> str:
     translated = translated.replace(
         "body_html = COALESCE(excluded.body_html, cached_messages.body_html)",
         "body_html = COALESCE(VALUES(body_html), cached_messages.body_html)",
+    )
+    translated = translated.replace(
+        "storage_path = COALESCE(excluded.storage_path, cached_messages.storage_path),",
+        "storage_path = COALESCE(VALUES(storage_path), cached_messages.storage_path),",
+    )
+    translated = translated.replace(
+        "storage_path = COALESCE(excluded.storage_path, cached_messages.storage_path)",
+        "storage_path = COALESCE(VALUES(storage_path), cached_messages.storage_path)",
     )
     translated = translated.replace("INSERT OR REPLACE INTO folder_stats", "INSERT INTO folder_stats")
     translated = translated.replace("PRIMARY KEY (user_uid, key)", "PRIMARY KEY (user_uid, setting_key)")
@@ -84,13 +102,48 @@ def _translate_sql(sql: str) -> str:
 
 def _extract_create_index_parts(sql: str) -> tuple[str, str] | None:
     match = re.search(
-        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)\s*\(",
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)\s*\(",
         sql,
         re.IGNORECASE,
     )
     if not match:
         return None
     return match.group(1), match.group(2)
+
+
+def _truncate_text_bytes(value: Optional[str], max_bytes: int) -> Optional[str]:
+    if not value:
+        return value
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    truncated = encoded[:max_bytes]
+    while truncated:
+        try:
+            return truncated.decode("utf-8") + "\n<!-- truncated -->"
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
+    return "<!-- truncated -->"
+
+
+def _estimate_param_size(params: Any) -> int:
+    if params is None:
+        return 0
+    if isinstance(params, (list, tuple)):
+        return sum(_estimate_param_size(item) for item in params)
+    if isinstance(params, bytes):
+        return len(params)
+    if isinstance(params, str):
+        return len(params.encode("utf-8"))
+    return len(str(params).encode("utf-8"))
+
+
+def build_cached_message_id(account_id: str, folder: str, uid: int) -> str:
+    raw_folder = (folder or "INBOX").strip() or "INBOX"
+    safe_folder = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_folder).strip("_")
+    safe_folder = (safe_folder or "folder")[:80]
+    folder_hash = hashlib.sha1(raw_folder.encode("utf-8")).hexdigest()[:12]
+    return f"{account_id}_{safe_folder}_{folder_hash}_{int(uid)}"
 
 
 class BufferedCursor:
@@ -113,72 +166,160 @@ class BufferedCursor:
 
 
 class MySQLConnection:
-    def __init__(self, connection: aiomysql.Connection):
-        self._connection = connection
-        self._execute_lock = asyncio.Lock()
+    def __init__(self, pool: aiomysql.Pool, connect_kwargs: dict[str, Any]):
+        self._pool = pool
+        self._connect_kwargs = dict(connect_kwargs)
+        self._pool_lock = asyncio.Lock()
         self._transaction_lock = asyncio.Lock()
-        self._transaction_owner: Optional[asyncio.Task] = None
+        self._transaction_connections: dict[asyncio.Task, aiomysql.Connection] = {}
         self.row_factory = None
 
-    async def _wait_for_transaction(self):
-        current_task = asyncio.current_task()
-        if self._transaction_owner is None or self._transaction_owner == current_task:
-            return
-        await self._transaction_lock.acquire()
-        self._transaction_lock.release()
+    async def _ensure_connected(self):
+        async with self._pool_lock:
+            if self._pool is None or self._pool.closed:
+                self._pool = await aiomysql.create_pool(
+                    minsize=1,
+                    maxsize=10,
+                    **self._connect_kwargs,
+                )
+
+    async def _get_transaction_connection(self, task: Optional[asyncio.Task]) -> Optional[aiomysql.Connection]:
+        if task is None:
+            return None
+        async with self._transaction_lock:
+            return self._transaction_connections.get(task)
+
+    async def _set_transaction_connection(self, task: asyncio.Task, conn: aiomysql.Connection) -> None:
+        async with self._transaction_lock:
+            self._transaction_connections[task] = conn
+
+    async def _pop_transaction_connection(self, task: Optional[asyncio.Task]) -> Optional[aiomysql.Connection]:
+        if task is None:
+            return None
+        async with self._transaction_lock:
+            return self._transaction_connections.pop(task, None)
 
     async def execute(self, sql: str, params=None):
         query = _translate_sql(sql)
         command = query.strip().upper()
         current_task = asyncio.current_task()
+
         if command == "BEGIN":
-            await self._wait_for_transaction()
-            await self._transaction_lock.acquire()
-            self._transaction_owner = current_task
-        else:
-            await self._wait_for_transaction()
+            return await self._begin_transaction(current_task)
+        if command == "COMMIT":
+            return await self._finish_transaction(current_task, commit=True)
+        if command == "ROLLBACK":
+            return await self._finish_transaction(current_task, commit=False)
 
-        async with self._execute_lock:
-            index_meta = _extract_create_index_parts(query)
-            async with self._connection.cursor() as cursor:
-                if index_meta:
-                    index_name, table_name = index_meta
-                    await cursor.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM information_schema.statistics
-                        WHERE table_schema = DATABASE()
-                          AND table_name = %s
-                          AND index_name = %s
-                        """,
-                        (table_name, index_name),
-                    )
-                    exists_row = await cursor.fetchone()
-                    if exists_row and exists_row[0]:
-                        return BufferedCursor([], [], 0, 0)
-                    query = re.sub(r"\s+IF\s+NOT\s+EXISTS", "", query, count=1, flags=re.IGNORECASE)
-                await cursor.execute(query, params)
-                rows = await cursor.fetchall() if cursor.description else []
-                buffered = BufferedCursor(rows, cursor.description, cursor.rowcount, cursor.lastrowid)
-
-        if command in {"COMMIT", "ROLLBACK"} and self._transaction_owner == current_task:
-            self._transaction_owner = None
-            if self._transaction_lock.locked():
-                self._transaction_lock.release()
-        return buffered
+        index_meta = _extract_create_index_parts(query)
+        return await self._execute_with_retry(query, params, index_meta, current_task)
 
     async def executemany(self, sql: str, param_list):
-        await self._wait_for_transaction()
         query = _translate_sql(sql)
-        async with self._execute_lock:
-            async with self._connection.cursor() as cursor:
-                await cursor.executemany(query, param_list)
-                return BufferedCursor([], cursor.description, cursor.rowcount, cursor.lastrowid)
+        current_task = asyncio.current_task()
+        for attempt in range(2):
+            owned_conn = await self._get_transaction_connection(current_task)
+            try:
+                return await self._executemany_once(query, param_list, owned_conn)
+            except (AssertionError, pymysql.err.InterfaceError, pymysql.err.OperationalError):
+                if owned_conn is not None:
+                    raise
+                if attempt == 1:
+                    raise
 
     async def commit(self):
-        await self._wait_for_transaction()
-        async with self._execute_lock:
-            await self._connection.commit()
+        current_task = asyncio.current_task()
+        owned_conn = await self._get_transaction_connection(current_task)
+        if owned_conn is not None:
+            await owned_conn.commit()
+
+    async def _begin_transaction(self, task: Optional[asyncio.Task]):
+        if task is None:
+            raise RuntimeError("BEGIN requires an active task")
+        existing = await self._get_transaction_connection(task)
+        if existing is not None:
+            return BufferedCursor([], [], 0, 0)
+        await self._ensure_connected()
+        conn = await self._pool.acquire()
+        try:
+            await conn.ping(reconnect=True)
+            await conn.begin()
+        except Exception:
+            self._pool.release(conn)
+            raise
+        await self._set_transaction_connection(task, conn)
+        return BufferedCursor([], [], 0, 0)
+
+    async def _finish_transaction(self, task: Optional[asyncio.Task], *, commit: bool):
+        conn = await self._pop_transaction_connection(task)
+        if conn is None:
+            return BufferedCursor([], [], 0, 0)
+        try:
+            if commit:
+                await conn.commit()
+            else:
+                await conn.rollback()
+        finally:
+            self._pool.release(conn)
+        return BufferedCursor([], [], 0, 0)
+
+    async def _execute_with_retry(self, query: str, params, index_meta, task: Optional[asyncio.Task]):
+        for attempt in range(2):
+            owned_conn = await self._get_transaction_connection(task)
+            try:
+                return await self._execute_once(query, params, index_meta, owned_conn)
+            except (AssertionError, pymysql.err.InterfaceError, pymysql.err.OperationalError):
+                if owned_conn is not None:
+                    raise
+                if attempt == 1:
+                    raise
+
+    async def _execute_once(self, query: str, params, index_meta, owned_conn: Optional[aiomysql.Connection]):
+        if owned_conn is not None:
+            return await self._execute_on_connection(owned_conn, query, params, index_meta, commit_after=False)
+        await self._ensure_connected()
+        async with self._pool.acquire() as conn:
+            await conn.ping(reconnect=True)
+            return await self._execute_on_connection(conn, query, params, index_meta, commit_after=True)
+
+    async def _executemany_once(self, query: str, param_list, owned_conn: Optional[aiomysql.Connection]):
+        if owned_conn is not None:
+            async with owned_conn.cursor() as cursor:
+                await cursor.executemany(query, param_list)
+                return BufferedCursor([], cursor.description, cursor.rowcount, cursor.lastrowid)
+        await self._ensure_connected()
+        async with self._pool.acquire() as conn:
+            await conn.ping(reconnect=True)
+            async with conn.cursor() as cursor:
+                await cursor.executemany(query, param_list)
+                await conn.commit()
+                return BufferedCursor([], cursor.description, cursor.rowcount, cursor.lastrowid)
+
+    async def _execute_on_connection(self, conn: aiomysql.Connection, query: str, params, index_meta, *, commit_after: bool):
+        async with conn.cursor() as cursor:
+            if index_meta:
+                index_name, table_name = index_meta
+                await cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM information_schema.statistics
+                    WHERE table_schema = DATABASE()
+                      AND table_name = %s
+                      AND index_name = %s
+                    """,
+                    (table_name, index_name),
+                )
+                exists_row = await cursor.fetchone()
+                if exists_row and exists_row[0]:
+                    if commit_after:
+                        await conn.commit()
+                    return BufferedCursor([], [], 0, 0)
+                query = re.sub(r"\s+IF\s+NOT\s+EXISTS", "", query, count=1, flags=re.IGNORECASE)
+            await cursor.execute(query, params)
+            rows = await cursor.fetchall() if cursor.description else []
+            if commit_after:
+                await conn.commit()
+            return BufferedCursor(rows, cursor.description, cursor.rowcount, cursor.lastrowid)
 
 
 async def _connect_mysql_with_retry() -> MySQLConnection:
@@ -186,7 +327,12 @@ async def _connect_mysql_with_retry() -> MySQLConnection:
     last_error: Exception | None = None
     for attempt in range(1, DB_CONNECT_RETRY_COUNT + 1):
         try:
-            return MySQLConnection(await aiomysql.connect(**connect_kwargs))
+            pool = await aiomysql.create_pool(
+                minsize=1,
+                maxsize=10,
+                **connect_kwargs,
+            )
+            return MySQLConnection(pool, connect_kwargs)
         except Exception as exc:
             last_error = exc
             logger.warning(
@@ -200,46 +346,31 @@ async def _connect_mysql_with_retry() -> MySQLConnection:
             await asyncio.sleep(DB_CONNECT_RETRY_DELAY)
     raise last_error or RuntimeError("数据库连接失败")
 
-# 全局单例数据库连接，避免每次操作都新建连接（连接创建开销大，且每次设置 WAL 是冗余操作）
+# 全局单例数据库连接池，避免每次操作都新建连接。
 _db_instance: Optional[MySQLConnection] = None
-# 保护单例创建的锁，防止并发 get_db() 创建多个连接
+# 保护单例创建，防止并发 get_db() 创建多个连接池。
 _db_lock = asyncio.Lock()
 
 
 async def get_db() -> MySQLConnection:
-    """获取全局单例数据库连接
-
-    使用单例模式复用连接，WAL 模式只在首次连接时设置一次。
-    如果旧代码误关了连接，这里会自动重建，避免出现 no active connection。
-
-    修复 P3：用 asyncio.Lock 保护创建逻辑，防止并发 get_db() 创建多个连接导致旧连接泄漏。
-    """
+    """获取全局数据库连接池。"""
     global _db_instance
-    # 快速路径：连接已存在直接返回（无锁，性能优先）
-    if _db_instance is not None and getattr(_db_instance, "_connection", None) is not None:
+    if _db_instance is not None and getattr(_db_instance, "_pool", None) is not None:
+        await _db_instance._ensure_connected()
         return _db_instance
-    # 慢速路径：需要创建连接，加锁防止并发创建
     async with _db_lock:
-        # 双重检查：可能在等锁期间已被其他协程创建
-        if _db_instance is None or getattr(_db_instance, "_connection", None) is None:
+        if _db_instance is None or getattr(_db_instance, "_pool", None) is None:
             ensure_data_dirs()
             _db_instance = await _connect_mysql_with_retry()
-            # 设置行工厂，让 fetchall 返回的行支持按列名访问
+        else:
+            await _db_instance._ensure_connected()
     return _db_instance
 
 
 async def init_db():
-    """初始化数据库：创建所有表和索引
-
-    表结构:
-      - accounts: 邮箱账号（provider/credentials/连接状态等）
-      - folder_stats: 文件夹统计（邮件数/未读数/同步时间）
-      - cached_messages: 邮件摘要缓存（主题/发件人/时间/已读等）
-      - notifications: 新邮件通知记录
-
-    迁移策略: 使用 try-except 逐表创建，已存在的表会跳过
-    """
+    """初始化数据库表和索引。"""
     db = await get_db()
+
     await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id VARCHAR(191) PRIMARY KEY,
@@ -262,6 +393,7 @@ async def init_db():
                 remark VARCHAR(255) DEFAULT '',
                 group_name VARCHAR(255) DEFAULT '',
                 hide_email INTEGER DEFAULT 0,
+                poll_interval_seconds INTEGER DEFAULT 10,
                 created_at REAL DEFAULT 0,
                 updated_at REAL DEFAULT 0
             )
@@ -282,23 +414,37 @@ async def init_db():
                 has_attachments INTEGER DEFAULT 0,
                 body_text LONGTEXT,
                 body_html LONGTEXT,
+                storage_path LONGTEXT,
                 cached_at REAL DEFAULT 0,
                 FOREIGN KEY (account_id) REFERENCES accounts(id)
             )
         """)
+    await db.execute("""
+            CREATE TABLE IF NOT EXISTS cached_attachments (
+                account_id VARCHAR(191) NOT NULL,
+                user_uid VARCHAR(191) NOT NULL,
+                uid INTEGER NOT NULL,
+                folder VARCHAR(255) NOT NULL,
+                part_number INTEGER NOT NULL,
+                filename VARCHAR(512) DEFAULT '',
+                content_type VARCHAR(255) DEFAULT '',
+                size BIGINT DEFAULT 0,
+                content_id VARCHAR(512) DEFAULT '',
+                is_inline INTEGER DEFAULT 0,
+                local_path LONGTEXT,
+                cached_at REAL DEFAULT 0,
+                PRIMARY KEY (account_id, folder, uid, part_number)
+            )
+        """)
     await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON cached_messages(user_uid)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_folder ON cached_messages(folder)")
-    # 新增索引：按账号+文件夹查询缓存（列表接口核心查询）
     await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_account_folder ON cached_messages(account_id, folder)")
-    # 新增索引：按账号+文件夹+UID查询，用于增量同步时获取最大UID
     await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_uid ON cached_messages(account_id, folder, uid)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_unified ON cached_messages(user_uid, folder, account_id)")
-    # 修复 Q5：新增索引：按账号+文件夹+已读状态查询，用于未读计数和筛选
+    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cached_messages_account_folder_uid ON cached_messages(account_id, folder, uid)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_read ON cached_messages(account_id, folder, is_read)")
-    # 修复 Q5：新增索引：accounts 表按 user_uid 查询（get_accounts 核心查询，几乎所有API都调用）
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_cached_attachments_lookup ON cached_attachments(account_id, folder, uid)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_uid)")
 
-    # 通知表：持久化新邮件通知记录
     await db.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
                 id VARCHAR(191) PRIMARY KEY,
@@ -316,8 +462,6 @@ async def init_db():
     await db.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_uid)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(user_uid, is_read)")
 
-    # 文件夹统计表：存储 IMAP 返回的真实邮件总数和未读数
-    # 解决缓存只存部分邮件时 COUNT(*) 不等于 IMAP 真实总数的问题
     await db.execute("""
             CREATE TABLE IF NOT EXISTS folder_stats (
                 account_id VARCHAR(191) NOT NULL,
@@ -329,7 +473,20 @@ async def init_db():
             )
         """)
 
-    # 签名模板表：支持多签名模板管理（替代原来 settings.json 中的单一签名）
+    await db.execute("""
+            CREATE TABLE IF NOT EXISTS account_folder_counts (
+                account_id VARCHAR(191) NOT NULL,
+                folder_key VARCHAR(64) NOT NULL,
+                folder_path VARCHAR(255) NOT NULL,
+                display_name VARCHAR(255) NOT NULL,
+                total_count INTEGER DEFAULT 0,
+                unread_count INTEGER DEFAULT 0,
+                cached_count INTEGER DEFAULT 0,
+                updated_at REAL DEFAULT 0,
+                PRIMARY KEY (account_id, folder_key)
+            )
+        """)
+
     await db.execute("""
             CREATE TABLE IF NOT EXISTS signatures (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -343,8 +500,6 @@ async def init_db():
             )
         """)
 
-    # 修复 D1：用户级配置表，按 user_uid 隔离（unified_account_ids/signature_html/signature_enabled）
-    # 替代原来全局 settings.json 中混存的用户级配置，避免多用户互相覆盖
     await db.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_uid VARCHAR(191) NOT NULL,
@@ -354,11 +509,13 @@ async def init_db():
                 PRIMARY KEY (user_uid, setting_key)
             )
         """)
+
     await db.execute("""
             CREATE TABLE IF NOT EXISTS history_sync_jobs (
                 id VARCHAR(191) PRIMARY KEY,
                 account_id VARCHAR(191) NOT NULL,
                 user_uid VARCHAR(191) NOT NULL,
+                job_type VARCHAR(64) DEFAULT 'history_sync',
                 status VARCHAR(64) DEFAULT 'pending',
                 current_folder VARCHAR(255) DEFAULT '',
                 current_page INTEGER DEFAULT 1,
@@ -375,95 +532,88 @@ async def init_db():
             )
         """)
 
-    # 数据库迁移：为已有数据库补充新列（SQLite 不支持 IF NOT EXISTS 加列，需要 try-except）
     try:
         await db.execute("ALTER TABLE accounts ADD COLUMN hide_email INTEGER DEFAULT 0")
     except Exception as e:
-        logger.debug("迁移加列已存在，忽略 accounts.hide_email: %s", e)
+        logger.debug("migration add accounts.hide_email ignored: %s", e)
+    try:
+        await db.execute("ALTER TABLE accounts ADD COLUMN poll_interval_seconds INTEGER DEFAULT 10")
+    except Exception as e:
+        logger.debug("migration add accounts.poll_interval_seconds ignored: %s", e)
 
     try:
         await db.execute("ALTER TABLE cached_messages ADD COLUMN has_attachments INTEGER DEFAULT 0")
     except Exception as e:
-        logger.debug("迁移加列已存在，忽略 cached_messages.has_attachments: %s", e)
+        logger.debug("migration add cached_messages.has_attachments ignored: %s", e)
 
-    # 通知表新增 type 和 message 字段（兼容旧数据）
+    try:
+        await db.execute("ALTER TABLE cached_messages ADD COLUMN storage_path LONGTEXT")
+    except Exception as e:
+        logger.debug("migration add cached_messages.storage_path ignored: %s", e)
+
     try:
         await db.execute("ALTER TABLE notifications ADD COLUMN type VARCHAR(64) DEFAULT 'new_mail'")
     except Exception as e:
-        logger.debug("迁移加列已存在，忽略 notifications.type: %s", e)
+        logger.debug("migration add notifications.type ignored: %s", e)
+
     try:
         await db.execute("ALTER TABLE notifications ADD COLUMN message VARCHAR(1024) DEFAULT ''")
     except Exception as e:
-        logger.debug("迁移加列已存在，忽略 notifications.message: %s", e)
+        logger.debug("migration add notifications.message ignored: %s", e)
 
-    # 安全修复 S3：signatures 表添加 user_uid 字段，支持多用户隔离
+    try:
+        await db.execute("ALTER TABLE history_sync_jobs ADD COLUMN job_type VARCHAR(64) DEFAULT 'history_sync'")
+    except Exception as e:
+        logger.debug("migration add history_sync_jobs.job_type ignored: %s", e)
     try:
         await db.execute("ALTER TABLE history_sync_jobs ADD COLUMN current_uid INTEGER DEFAULT 0")
     except Exception as e:
-        logger.debug("杩佺Щ鍔犲垪宸插瓨鍦紝蹇界暐 history_sync_jobs.current_uid: %s", e)
+        logger.debug("migration add history_sync_jobs.current_uid ignored: %s", e)
     try:
         await db.execute("ALTER TABLE history_sync_jobs ADD COLUMN downloaded_attachments INTEGER DEFAULT 0")
     except Exception as e:
-        logger.debug("杩佺Щ鍔犲垪宸插瓨鍦紝蹇界暐 history_sync_jobs.downloaded_attachments: %s", e)
+        logger.debug("migration add history_sync_jobs.downloaded_attachments ignored: %s", e)
     try:
         await db.execute("ALTER TABLE history_sync_jobs ADD COLUMN downloaded_inline_images INTEGER DEFAULT 0")
     except Exception as e:
-        logger.debug("杩佺Щ鍔犲垪宸插瓨鍦紝蹇界暐 history_sync_jobs.downloaded_inline_images: %s", e)
+        logger.debug("migration add history_sync_jobs.downloaded_inline_images ignored: %s", e)
     try:
         await db.execute("ALTER TABLE history_sync_jobs ADD COLUMN finished_at REAL DEFAULT 0")
     except Exception as e:
-        logger.debug("杩佺Щ鍔犲垪宸插瓨鍦紝蹇界暐 history_sync_jobs.finished_at: %s", e)
+        logger.debug("migration add history_sync_jobs.finished_at ignored: %s", e)
 
     try:
         await db.execute("ALTER TABLE signatures ADD COLUMN user_uid VARCHAR(191) DEFAULT ''")
     except Exception as e:
-        logger.debug("迁移加列已存在，忽略 signatures.user_uid: %s", e)
+        logger.debug("migration add signatures.user_uid ignored: %s", e)
 
     await db.commit()
 
 async def get_accounts(user_uid: str) -> List[Account]:
-    """获取账号列表。user_uid 为空字符串时返回所有用户的账号。"""
+    """按用户获取账号；user_uid 为空时返回全部账号。"""
     db = await get_db()
     if user_uid:
-        cursor = await db.execute(
-            "SELECT * FROM accounts WHERE user_uid = ?", (user_uid,)
-        )
+        cursor = await db.execute("SELECT * FROM accounts WHERE user_uid = ? ORDER BY created_at DESC", (user_uid,))
     else:
-        cursor = await db.execute("SELECT * FROM accounts")
+        cursor = await db.execute("SELECT * FROM accounts ORDER BY created_at DESC")
     rows = await cursor.fetchall()
-    # 获取列名
     columns = [description[0] for description in cursor.description]
     return [Account(**dict(zip(columns, row))) for row in rows]
 
 
-async def get_account_by_id(account_id: str) -> Account | None:
-    """按主键直接查询单个账号。
-
-    O4 修复：token 刷新锁内 double-check 使用此函数，避免查询所有用户账号
-    （原 get_accounts("") 会加载所有用户的 email 和 credentials_json 到内存，
-    存在性能和隐私问题）。
-    """
-    db = await get_db()
-    cursor = await db.execute("SELECT * FROM accounts WHERE id = ?", (account_id,))
-    row = await cursor.fetchone()
-    if row is None:
-        return None
-    columns = [description[0] for description in cursor.description]
-    return Account(**dict(zip(columns, row)))
-
-
 async def create_account(account: Account) -> Account:
-    """创建邮箱账号记录，返回新账号的 id"""
+    """创建邮箱账号。"""
     db = await get_db()
     await db.execute(
         """INSERT INTO accounts
            (id, user_uid, email, provider, credentials_json, status,
-            remark, group_name, hide_email, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            remark, group_name, hide_email, poll_interval_seconds, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (account.id, account.user_uid, account.email, account.provider,
          account.credentials_json, account.status,
          account.remark, account.group_name,
          1 if account.hide_email else 0,
+         account.poll_interval_seconds,
          account.created_at, account.updated_at)
     )
     await db.commit()
@@ -471,475 +621,15 @@ async def create_account(account: Account) -> Account:
 
 
 async def delete_account(account_id: str, user_uid: str) -> bool:
-    """删除账号记录
-
-    注意：cached_messages 由 main.py 的 remove_account 接口显式调用
-    delete_cached_messages_by_account 删除，此处不再重复删除。
-    """
+    """删除当前用户的邮箱账号。"""
     db = await get_db()
     cursor = await db.execute("DELETE FROM accounts WHERE id = ? AND user_uid = ?", (account_id, user_uid))
     await db.commit()
     return cursor.rowcount > 0
 
 
-async def update_account_credentials(account_id: str, credentials_json: str) -> bool:
-    """更新账号的凭据信息（用于令牌刷新后持久化）"""
-    db = await get_db()
-    cursor = await db.execute(
-        "UPDATE accounts SET credentials_json = ?, updated_at = ? WHERE id = ?",
-        (credentials_json, time.time(), account_id)
-    )
-    await db.commit()
-    return cursor.rowcount > 0
-
-
-async def update_account_info(account_id: str, user_uid: str, remark: str = "", group_name: str = "", hide_email: bool = False) -> bool:
-    """更新账号的备注、分组和隐藏邮箱设置"""
-    db = await get_db()
-    cursor = await db.execute(
-        "UPDATE accounts SET remark = ?, group_name = ?, hide_email = ?, updated_at = ? WHERE id = ? AND user_uid = ?",
-        (remark, group_name, 1 if hide_email else 0, time.time(), account_id, user_uid)
-    )
-    await db.commit()
-    return cursor.rowcount > 0
-
-
-# ==================== 通知 CRUD ====================
-
-async def create_notification(notification: Notification) -> Notification:
-    """创建通知记录（新邮件、定时发送结果等）"""
-    db = await get_db()
-    await db.execute(
-        "INSERT INTO notifications (id, user_uid, account_id, provider, email, folder, is_read, created_at, type, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (notification.id, notification.user_uid, notification.account_id,
-         notification.provider, notification.email, notification.folder,
-         1 if notification.is_read else 0, notification.created_at,
-         notification.type, notification.message)
-    )
-    await db.commit()
-    return notification
-
-
-async def get_notifications(user_uid: str, limit: int = 50) -> List[Notification]:
-    """获取用户的通知列表（按时间倒序，最多 limit 条）"""
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT * FROM notifications WHERE user_uid = ? ORDER BY created_at DESC LIMIT ?",
-        (user_uid, limit)
-    )
-    rows = await cursor.fetchall()
-    columns = [description[0] for description in cursor.description]
-    return [Notification(**dict(zip(columns, row))) for row in rows]
-
-
-async def mark_notification_read(notification_id: str, user_uid: str) -> bool:
-    """标记单条通知为已读"""
-    db = await get_db()
-    cursor = await db.execute(
-        "UPDATE notifications SET is_read = 1 WHERE id = ? AND user_uid = ?",
-        (notification_id, user_uid)
-    )
-    await db.commit()
-    return cursor.rowcount > 0
-
-
-async def mark_all_notifications_read(user_uid: str) -> int:
-    """标记用户所有通知为已读，返回更新的行数"""
-    db = await get_db()
-    cursor = await db.execute(
-        "UPDATE notifications SET is_read = 1 WHERE user_uid = ? AND is_read = 0",
-        (user_uid,)
-    )
-    await db.commit()
-    return cursor.rowcount
-
-
-async def clear_notifications(user_uid: str) -> int:
-    """清空用户所有通知，返回删除的行数"""
-    db = await get_db()
-    cursor = await db.execute(
-        "DELETE FROM notifications WHERE user_uid = ?",
-        (user_uid,)
-    )
-    await db.commit()
-    return cursor.rowcount
-
-
-async def get_unread_notification_count(user_uid: str) -> int:
-    """获取用户未读通知数量"""
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT COUNT(*) FROM notifications WHERE user_uid = ? AND is_read = 0",
-        (user_uid,)
-    )
-    row = await cursor.fetchone()
-    return row[0] if row else 0
-
-
-# ==================== 邮件缓存 CRUD ====================
-
-async def upsert_cached_messages(messages: List[CachedMessage]) -> int:
-    """批量写入/更新邮件缓存（UPSERT）
-
-    使用 INSERT ... ON CONFLICT DO UPDATE 合并为单步操作：
-    - 新记录：直接插入
-    - 已存在记录：更新摘要字段，不覆盖已有正文（body_text/body_html 用 COALESCE 保留旧值）
-
-    返回写入的记录数。
-    """
-    if not messages:
-        return 0
-    db = await get_db()
-    await db.executemany(
-        """INSERT INTO cached_messages
-           (id, account_id, user_uid, uid, folder, subject, from_addr, to_addr,
-            date, is_read, is_starred, has_attachments, body_text, body_html, cached_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-            subject = excluded.subject,
-            from_addr = excluded.from_addr,
-            to_addr = excluded.to_addr,
-            date = excluded.date,
-            is_read = excluded.is_read,
-            is_starred = excluded.is_starred,
-            has_attachments = excluded.has_attachments,
-            cached_at = excluded.cached_at,
-            body_text = COALESCE(excluded.body_text, cached_messages.body_text),
-            body_html = COALESCE(excluded.body_html, cached_messages.body_html)""",
-        [
-            (m.id, m.account_id, m.user_uid, m.uid, m.folder,
-             m.subject, m.from_addr, m.to_addr, m.date,
-             1 if m.is_read else 0, 1 if m.is_starred else 0,
-             1 if m.has_attachments else 0,
-             m.body_text or None, m.body_html or None, m.cached_at)
-            for m in messages
-        ]
-    )
-    await db.commit()
-    return len(messages)
-
-
-async def batch_update_is_read(account_id: str, folder: str, updates: List[tuple]) -> int:
-    """批量更新邮件的 is_read 状态（只更新需要修正的记录）
-
-    updates: [(uid, is_read), ...]  其中 is_read 为 0 或 1
-    用于同步后批量校正 is_read，避免逐条 UPDATE 的性能问题。
-    """
-    if not updates:
-        return 0
-    db = await get_db()
-    await db.executemany(
-        "UPDATE cached_messages SET is_read = ? WHERE account_id = ? AND folder = ? AND uid = ?",
-        [(v, account_id, folder, uid) for uid, v in updates]
-    )
-    await db.commit()
-    return len(updates)
-
-
-async def get_cached_unread_count(account_id: str, folder: str) -> int:
-    """获取缓存中指定文件夹的未读邮件数量（轻量查询，用于判断是否需要校正 is_read）"""
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT COUNT(*) FROM cached_messages WHERE account_id = ? AND folder = ? AND is_read = 0",
-        (account_id, folder)
-    )
-    row = await cursor.fetchone()
-    return row[0] if row else 0
-
-
-async def get_cached_is_read(account_id: str, uid: int, folder: str) -> bool:
-    """查询缓存中单封邮件的 is_read 状态（轻量查询，不依赖正文）
-
-    用于 fetch_message_detail 写入缓存时保留已有的 is_read，
-    因为 get_cached_message_detail 在正文为空时返回 None，无法获取 is_read。
-    """
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT is_read FROM cached_messages WHERE id = ?",
-        (f"{account_id}_{uid}",),
-    )
-    row = await cursor.fetchone()
-    return bool(row[0]) if row else False
-
-
-async def get_cached_messages_by_folder(
-    user_uid: str, account_id: str, folder: str,
-    page: int = 1, page_size: int = 40,
-    read_filter: str = "", attachment_filter: bool = False,
-) -> dict:
-    """从缓存分页读取邮件列表（按邮件时间倒序，时间相同时按 UID 倒序）
-
-    返回格式与 list_messages API 一致：{messages, total, page, page_size, unread_total}
-    total 和 unread_total 优先从 folder_stats 读取（IMAP 真实总数），
-    如果 folder_stats 无记录则回退到 COUNT(*)（兼容旧数据）。
-
-    参数：
-        read_filter: "unread"=仅未读, "read"=仅已读, 空=全部
-        attachment_filter: True=仅有附件的邮件
-    """
-    db = await get_db()
-
-    # 构建 WHERE 条件（筛选模式下直接从缓存 COUNT，不依赖 folder_stats）
-    conditions = ["user_uid = ?", "account_id = ?", "folder = ?"]
-    params: list = [user_uid, account_id, folder]
-
-    if read_filter == "unread":
-        conditions.append("is_read = 0")
-    elif read_filter == "read":
-        conditions.append("is_read = 1")
-
-    if attachment_filter:
-        conditions.append("has_attachments = 1")
-
-    where_clause = " AND ".join(conditions)
-    has_filter = read_filter or attachment_filter
-
-    # 查询当前文件夹实际已缓存的邮件数量
-    cursor = await db.execute(
-        f"SELECT COUNT(*) FROM cached_messages WHERE {where_clause}",
-        params,
-    )
-    filtered_total = (await cursor.fetchone())[0]
-
-    if has_filter:
-        # 有筛选条件时，直接用筛选后的计数
-        total = filtered_total
-        unread_total = 0  # 筛选模式下不单独计算未读数
-    else:
-        # 无筛选时，优先从 folder_stats 获取 IMAP 真实总数
-        stats = await get_folder_stats(account_id, folder)
-        if stats["total_count"] > 0:
-            total = stats["total_count"]
-            unread_total = stats["unread_count"]
-        else:
-            total = filtered_total
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM cached_messages WHERE user_uid = ? AND account_id = ? AND folder = ? AND is_read = 0",
-                (user_uid, account_id, folder),
-            )
-            unread_total = (await cursor.fetchone())[0]
-
-    # 分页查询（按邮件时间倒序，时间相同时按 UID 倒序）
-    offset = (page - 1) * page_size
-    cursor = await db.execute(
-        f"""SELECT id, uid, subject, from_addr, to_addr, date, is_read, is_starred, folder, has_attachments
-           FROM cached_messages
-           WHERE {where_clause}
-           ORDER BY date DESC, uid DESC
-           LIMIT ? OFFSET ?""",
-        params + [page_size, offset],
-    )
-    rows = await cursor.fetchall()
-    messages = [
-        {
-            "id": str(row[1]),  # 返回 str(uid)，与 IMAP 的 Message.id 格式一致
-            "uid": row[1],
-            "subject": row[2],
-            "from_addr": row[3],
-            "to_addr": row[4],
-            "date": row[5],
-            "is_read": bool(row[6]),
-            "is_starred": bool(row[7]),
-            "folder": row[8],
-            "has_attachments": bool(row[9]),
-        }
-        for row in rows
-    ]
-
-    result = {
-        "messages": messages,
-        "total": total,
-        "unread_total": unread_total,
-        "page": page,
-        "page_size": page_size,
-    }
-    # 无筛选时附加缓存统计（兼容旧逻辑）
-    if not has_filter:
-        stats = await get_folder_stats(account_id, folder)
-        result["cached_count"] = filtered_total
-        result["stats_updated_at"] = stats["updated_at"]
-    return result
-
-
-async def get_folder_filter_counts(user_uid: str, account_id: str, folder: str) -> dict:
-    """获取单账号文件夹各筛选条件的计数
-
-    all 和 unread 优先从 folder_stats 获取（IMAP真实值，与左侧边栏一致），
-    read 和 attachments 从 cached_messages 统计（folder_stats 不跟踪这两个维度）。
-    当 folder_stats 无记录时，回退到 cached_messages 的 COUNT。
-    """
-    # 从 folder_stats 获取 IMAP 真实总数和未读数
-    stats = await get_folder_stats(account_id, folder)
-
-    # 从缓存统计 read 和 attachments 计数
-    db = await get_db()
-    cursor = await db.execute(
-        """SELECT
-            SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) as read_count,
-            SUM(CASE WHEN has_attachments = 1 THEN 1 ELSE 0 END) as attachment_count
-           FROM cached_messages
-           WHERE user_uid = ? AND account_id = ? AND folder = ?""",
-        (user_uid, account_id, folder),
-    )
-    row = await cursor.fetchone()
-
-    # all 和 unread 优先用 folder_stats（与左侧边栏数据源一致，避免缓存不完整导致数字不一致）
-    if stats["total_count"] > 0:
-        all_count = stats["total_count"]
-        unread_count = stats["unread_count"]
-    else:
-        # folder_stats 无记录时回退到缓存 COUNT（兼容旧数据）
-        cursor = await db.execute(
-            """SELECT COUNT(*), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END)
-               FROM cached_messages
-               WHERE user_uid = ? AND account_id = ? AND folder = ?""",
-            (user_uid, account_id, folder),
-        )
-        fallback_row = await cursor.fetchone()
-        all_count = fallback_row[0] if fallback_row else 0
-        unread_count = fallback_row[1] if fallback_row else 0
-
-    return {
-        "all": all_count,
-        "unread": unread_count,
-        "read": row[0] if row and row[0] else 0,
-        "attachments": row[1] if row and row[1] else 0,
-    }
-
-
-async def get_cached_message_detail(account_id: str, uid: int, folder: str) -> Optional[dict]:
-    """从缓存获取单封邮件的完整详情（含正文）
-
-    如果缓存中有 body_html 或 body_text，直接返回（毫秒级），
-    避免每次查看邮件都去 IMAP 拉取（秒级）。
-    返回 None 表示缓存中没有正文内容，需要从 IMAP 拉取。
-    """
-    db = await get_db()
-    cache_id = f"{account_id}_{uid}"
-    cursor = await db.execute(
-        """SELECT id, uid, subject, from_addr, to_addr, date, is_read, is_starred,
-                  folder, body_text, body_html, has_attachments
-           FROM cached_messages
-           WHERE id = ?""",
-        (cache_id,),
-    )
-    row = await cursor.fetchone()
-    if not row:
-        return None
-    body_html = row[10] or ""
-    body_text = row[9] or ""
-    # 如果正文为空，说明列表同步时只存了摘要，需要从 IMAP 拉取
-    if not body_html and not body_text:
-        return None
-    return {
-        "id": str(row[1]),
-        "uid": row[1],
-        "subject": row[2],
-        "from_addr": row[3],
-        "to_addr": row[4],
-        "date": row[5],
-        "is_read": bool(row[6]),
-        "is_starred": bool(row[7]),
-        "folder": row[8],
-        "body_text": body_text,
-        "body_html": body_html,
-        "has_attachments": bool(row[11]),
-        "attachments": [],  # 缓存中不存附件列表，需要 IMAP 拉取时补充
-    }
-
-
-async def get_max_cached_uid(user_uid: str, account_id: str, folder: str) -> int:
-    """获取文件夹中最大的已缓存 UID（用于增量同步起点）
-
-    返回 0 表示该文件夹没有缓存（需要全量同步）。
-    """
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT MAX(uid) FROM cached_messages WHERE user_uid = ? AND account_id = ? AND folder = ?",
-        (user_uid, account_id, folder),
-    )
-    row = await cursor.fetchone()
-    return row[0] if row and row[0] else 0
-
-
-async def delete_cached_messages_by_account(account_id: str) -> int:
-    """删除账号的所有邮件缓存（删除账号时调用）"""
-    db = await get_db()
-    cursor = await db.execute(
-        "DELETE FROM cached_messages WHERE account_id = ?",
-        (account_id,)
-    )
-    await db.commit()
-    return cursor.rowcount
-
-
-async def purge_deleted_from_cache(account_id: str, folder: str, existing_uids: set) -> int:
-    """清理缓存中已不在 IMAP 服务器上的邮件
-
-    对比缓存中的 UID 和 IMAP 返回的 UID 列表，删除缓存中多余的邮件。
-    返回删除的记录数。
-    使用临时表避免将所有缓存 UID 加载到 Python 内存。
-    """
-    if not existing_uids:
-        return 0
-    db = await get_db()
-    # 用临时表存储 IMAP 上存在的 UID，然后用 SQL 子查询删除过期缓存
-    # 避免将所有缓存 UID 加载到 Python 内存（万封邮箱时节省大量内存）
-    await db.execute("CREATE TEMP TABLE IF NOT EXISTS _tmp_existing_uids (uid INTEGER)")
-    await db.execute("DELETE FROM _tmp_existing_uids")
-    await db.executemany(
-        "INSERT INTO _tmp_existing_uids (uid) VALUES (?)",
-        [(uid,) for uid in existing_uids]
-    )
-    cursor = await db.execute(
-        """DELETE FROM cached_messages
-           WHERE account_id = ? AND folder = ?
-           AND uid NOT IN (SELECT uid FROM _tmp_existing_uids)""",
-        (account_id, folder),
-    )
-    await db.execute("DROP TABLE IF EXISTS _tmp_existing_uids")
-    await db.commit()
-    return cursor.rowcount
-
-
-async def delete_cached_message(account_id: str, uid: int, folder: str) -> bool:
-    """删除单封邮件缓存（删除/移动邮件后同步缓存）"""
-    db = await get_db()
-    cursor = await db.execute(
-        "DELETE FROM cached_messages WHERE account_id = ? AND uid = ? AND folder = ?",
-        (account_id, uid, folder)
-    )
-    await db.commit()
-    return cursor.rowcount > 0
-
-
-async def update_cached_message_read(account_id: str, uid: int, folder: str, is_read: bool) -> bool:
-    """更新缓存中邮件的已读状态（标记已读后同步缓存）"""
-    db = await get_db()
-    cursor = await db.execute(
-        "UPDATE cached_messages SET is_read = ? WHERE account_id = ? AND uid = ? AND folder = ?",
-        (1 if is_read else 0, account_id, uid, folder)
-    )
-    await db.commit()
-    return cursor.rowcount > 0
-
-
 async def batch_delete_cached_messages(account_id: str, uids: list[int], folder: str) -> int:
-    """批量删除缓存邮件（单次数据库操作，替代逐条删除的 N+1 问题）"""
-    if not uids:
-        return 0
-    db = await get_db()
-    placeholders = ",".join("?" * len(uids))
-    cursor = await db.execute(
-        f"DELETE FROM cached_messages WHERE account_id = ? AND folder = ? AND uid IN ({placeholders})",
-        [account_id, folder] + uids
-    )
-    await db.commit()
-    return cursor.rowcount
-
-
-async def get_cached_count(account_id: str, folder: str) -> int:
-    """获取指定文件夹的缓存邮件数量（用于删除后快速更新 folder_stats）"""
+    """Get cached message count for a folder after delete/move operations."""
     db = await get_db()
     cursor = await db.execute(
         "SELECT COUNT(*) FROM cached_messages WHERE account_id = ? AND folder = ?",
@@ -950,37 +640,24 @@ async def get_cached_count(account_id: str, folder: str) -> int:
 
 
 async def get_cached_uids(account_id: str, folder: str) -> set:
-    """获取指定文件夹缓存中所有邮件的 UID 集合（用于补全同步时对比差异）"""
+    """Return cached message UIDs for the given account and folder aliases."""
+    aliases = _expand_folder_aliases(folder)
+    if not aliases:
+        return set()
     db = await get_db()
+    placeholders = ",".join("?" * len(aliases))
     cursor = await db.execute(
-        "SELECT uid FROM cached_messages WHERE account_id = ? AND folder = ?",
-        (account_id, folder),
+        f"SELECT uid FROM cached_messages WHERE account_id = ? AND folder IN ({placeholders})",
+        [account_id] + aliases,
     )
     rows = await cursor.fetchall()
-    return {row[0] for row in rows}
-
-
-async def batch_update_cached_messages_read(account_id: str, uids: list[int], folder: str, is_read: bool) -> int:
-    """批量更新缓存邮件已读状态（单次数据库操作，替代逐条更新的 N+1 问题）"""
-    if not uids:
-        return 0
-    db = await get_db()
-    placeholders = ",".join("?" * len(uids))
-    cursor = await db.execute(
-        f"UPDATE cached_messages SET is_read = ? WHERE account_id = ? AND folder = ? AND uid IN ({placeholders})",
-        [1 if is_read else 0, account_id, folder] + uids
-    )
-    await db.commit()
-    return cursor.rowcount
+    return {int(row[0]) for row in rows if row and row[0] is not None}
 
 
 # ==================== 文件夹统计 CRUD ====================
 
 async def upsert_folder_stats(account_id: str, folder: str, total_count: int, unread_count: int) -> None:
-    """更新文件夹的邮件总数和未读数（IMAP 同步后调用）
-
-    使用 INSERT OR REPLACE 确保始终保存最新的 IMAP 统计数据。
-    """
+    """Persist the latest IMAP folder statistics for the given account and folder."""
     db = await get_db()
     await db.execute(
         """INSERT INTO folder_stats (account_id, folder, total_count, unread_count, updated_at)
@@ -992,103 +669,204 @@ async def upsert_folder_stats(account_id: str, folder: str, total_count: int, un
         (account_id, folder, total_count, unread_count, time.time())
     )
     await db.commit()
+    cached_count = None
+    try:
+        cached_count = await get_cached_count(account_id, folder)
+    except Exception as exc:
+        logger.debug("get cached count for folder counter failed: %s", exc)
+    await upsert_account_folder_count(
+        account_id,
+        folder,
+        total_count,
+        unread_count,
+        cached_count=cached_count,
+    )
 
 
 async def get_folder_stats(account_id: str, folder: str) -> dict:
-    """获取文件夹的邮件统计（总数、未读数）
+    """Return folder stats with total_count, unread_count, and updated_at fields."""
+    return await _get_folder_stats_by_aliases(account_id, folder)
 
-    返回 {"total_count": int, "unread_count": int, "updated_at": float}，无记录时 updated_at 为 0。
-    """
+
+async def list_folder_stats_by_account(account_id: str) -> List[dict]:
     db = await get_db()
     cursor = await db.execute(
-        "SELECT total_count, unread_count, updated_at FROM folder_stats WHERE account_id = ? AND folder = ?",
-        (account_id, folder),
+        "SELECT folder, total_count, unread_count, updated_at FROM folder_stats WHERE account_id = ? ORDER BY updated_at DESC, folder ASC",
+        (account_id,),
     )
-    row = await cursor.fetchone()
-    if row:
-        return {"total_count": row[0], "unread_count": row[1], "updated_at": row[2]}
-    return {"total_count": 0, "unread_count": 0, "updated_at": 0}
+    rows = await cursor.fetchall()
+    return [
+        {"folder": row[0], "total_count": row[1], "unread_count": row[2], "updated_at": row[3]}
+        for row in rows
+    ]
+
+
+async def list_cached_folders_by_account(account_id: str) -> List[str]:
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT DISTINCT folder FROM cached_messages WHERE account_id = ? ORDER BY folder ASC",
+        (account_id,),
+    )
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows if row and row[0]]
 
 
 async def delete_folder_stats_by_account(account_id: str) -> None:
-    """删除账号的所有文件夹统计（删除账号时调用）"""
     db = await get_db()
     await db.execute("DELETE FROM folder_stats WHERE account_id = ?", (account_id,))
     await db.commit()
+    await delete_account_folder_counts_by_account(account_id)
 
 
-# ==================== 签名模板 CRUD ====================
+CORE_FOLDER_DEFINITIONS = [
+    ("inbox", "INBOX", "收件箱", ["INBOX", "Inbox"]),
+    ("sent", "Sent Messages", "已发送", ["Sent", "Sent Messages", "Sent Items", "[Gmail]/Sent Mail"]),
+    ("drafts", "Drafts", "草稿箱", ["Drafts", "[Gmail]/Drafts"]),
+    ("junk", "Junk", "垃圾邮件", ["Junk", "Junk Email", "Spam", "[Gmail]/Spam"]),
+    ("trash", "Trash", "已删除", ["Trash", "Deleted", "Deleted Items", "Deleted Messages", "[Gmail]/Trash", "已删除"]),
+]
 
-async def get_signatures(user_uid: str = "") -> List[Signature]:
-    """获取签名模板列表。user_uid 为空时返回所有（仅管理员场景用），否则按用户过滤。"""
+
+def folder_key_for_path(folder: str) -> str:
+    folder_lower = (folder or "").strip().lower()
+    extra_aliases = {
+        "sent": {"sent mail", "[google mail]/sent mail", "已发送"},
+        "drafts": {"[google mail]/drafts", "草稿箱"},
+        "junk": {"[google mail]/spam", "垃圾邮件"},
+        "trash": {"[google mail]/trash", "已删除"},
+    }
+    for key, aliases in extra_aliases.items():
+        if folder_lower in aliases:
+            return key
+    for key, _default_path, _display_name, aliases in CORE_FOLDER_DEFINITIONS:
+        if any(folder_lower == alias.lower() for alias in aliases):
+            return key
+    return folder_lower or "inbox"
+
+
+def folder_display_name_for_key(folder_key: str, fallback: str = "") -> str:
+    for key, _default_path, display_name, _aliases in CORE_FOLDER_DEFINITIONS:
+        if key == folder_key:
+            return display_name
+    return fallback or folder_key
+
+
+def default_path_for_folder_key(folder_key: str) -> str:
+    for key, default_path, _display_name, _aliases in CORE_FOLDER_DEFINITIONS:
+        if key == folder_key:
+            return default_path
+    return folder_key
+
+
+async def upsert_account_folder_count(
+    account_id: str,
+    folder_path: str,
+    total_count: int,
+    unread_count: int,
+    *,
+    cached_count: int | None = None,
+) -> None:
+    folder_key = folder_key_for_path(folder_path)
+    display_name = folder_display_name_for_key(folder_key, folder_path)
     db = await get_db()
-    if user_uid:
-        cursor = await db.execute(
-            "SELECT * FROM signatures WHERE user_uid = ? ORDER BY is_default DESC, id ASC",
-            (user_uid,)
-        )
-    else:
-        cursor = await db.execute(
-            "SELECT * FROM signatures ORDER BY is_default DESC, id ASC"
-        )
+    await db.execute(
+        """INSERT INTO account_folder_counts
+           (account_id, folder_key, folder_path, display_name, total_count, unread_count, cached_count, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+           folder_path = VALUES(folder_path),
+           display_name = VALUES(display_name),
+           total_count = VALUES(total_count),
+           unread_count = VALUES(unread_count),
+           cached_count = COALESCE(VALUES(cached_count), account_folder_counts.cached_count),
+           updated_at = VALUES(updated_at)""",
+        (
+            account_id,
+            folder_key,
+            folder_path or default_path_for_folder_key(folder_key),
+            display_name,
+            max(int(total_count or 0), 0),
+            max(int(unread_count or 0), 0),
+            cached_count,
+            time.time(),
+        ),
+    )
+    await db.commit()
+
+
+async def list_account_folder_counts(account_id: str) -> List[dict]:
+    db = await get_db()
+    cursor = await db.execute(
+        """SELECT folder_key, folder_path, display_name, total_count, unread_count, cached_count, updated_at
+           FROM account_folder_counts
+           WHERE account_id = ?""",
+        (account_id,),
+    )
     rows = await cursor.fetchall()
-    columns = [description[0] for description in cursor.description]
-    return [Signature(**dict(zip(columns, row))) for row in rows]
+    by_key = {
+        row[0]: {
+            "folder_key": row[0],
+            "folder_path": row[1],
+            "display_name": row[2],
+            "total_count": int(row[3] or 0),
+            "unread_count": int(row[4] or 0),
+            "cached_count": int(row[5] or 0),
+            "updated_at": float(row[6] or 0),
+        }
+        for row in rows
+    }
+    result = []
+    for key, default_path, display_name, _aliases in CORE_FOLDER_DEFINITIONS:
+        result.append(by_key.get(key) or {
+            "folder_key": key,
+            "folder_path": default_path,
+            "display_name": display_name,
+            "total_count": 0,
+            "unread_count": 0,
+            "cached_count": 0,
+            "updated_at": 0,
+        })
+    return result
+
+
+async def delete_account_folder_counts_by_account(account_id: str) -> None:
+    db = await get_db()
+    await db.execute("DELETE FROM account_folder_counts WHERE account_id = ?", (account_id,))
+    await db.commit()
+
+
+async def adjust_account_folder_unread(account_id: str, folder_path: str, delta: int) -> None:
+    folder_key = folder_key_for_path(folder_path)
+    db = await get_db()
+    await db.execute(
+        """UPDATE account_folder_counts
+           SET unread_count = GREATEST(unread_count + ?, 0),
+               updated_at = ?
+           WHERE account_id = ? AND folder_key = ?""",
+        (int(delta or 0), time.time(), account_id, folder_key),
+    )
+    await db.commit()
 
 
 async def get_signature_by_id(sig_id: int, user_uid: str = "") -> Optional[Signature]:
-    """根据 ID 获取单个签名模板。传入 user_uid 时校验归属，不匹配返回 None。"""
     db = await get_db()
+    sql = "SELECT * FROM signatures WHERE id = ?"
+    params: list[Any] = [sig_id]
     if user_uid:
-        cursor = await db.execute("SELECT * FROM signatures WHERE id = ? AND user_uid = ?", (sig_id, user_uid))
-    else:
-        cursor = await db.execute("SELECT * FROM signatures WHERE id = ?", (sig_id,))
+        sql += " AND user_uid = ?"
+        params.append(user_uid)
+    sql += " LIMIT 1"
+    cursor = await db.execute(sql, params)
     row = await cursor.fetchone()
     if not row:
         return None
-    columns = [description[0] for description in cursor.description]
-    return Signature(**dict(zip(columns, row)))
-
-
-async def create_signature(sig: Signature) -> Signature:
-    """创建签名模板
-
-    若 is_default=1，先将该用户的其他模板 is_default 设为 0（确保只有一个默认签名）。
-    修复 D3：用显式事务包裹，确保清默认+插入的原子性。
-    """
-    db = await get_db()
-    now = time.time()
-    # 修复 D3：显式事务，防止清默认后插入失败导致所有默认签名丢失
-    await db.execute("BEGIN")
-    try:
-        if sig.is_default:
-            await db.execute("UPDATE signatures SET is_default = 0 WHERE user_uid = ?", (sig.user_uid or "",))
-        cursor = await db.execute(
-            """INSERT INTO signatures (name, content_html, is_default, account_id, user_uid, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (sig.name, sig.content_html, 1 if sig.is_default else 0,
-             sig.account_id or "", sig.user_uid or "", now, now)
-        )
-        await db.execute("COMMIT")
-    except Exception:
-        await db.execute("ROLLBACK")
-        raise
-    sig.id = cursor.lastrowid
-    sig.created_at = now
-    sig.updated_at = now
-    return sig
+    return Signature(**_row_to_dict(cursor, row))
 
 
 async def update_signature(sig: Signature) -> bool:
-    """更新签名模板
-
-    若 is_default=1，先将该用户的其他模板 is_default 设为 0。
-    返回是否更新成功。
-    修复 D3：用显式事务包裹，确保清默认+更新的原子性。
-    """
+    """Update a signature and keep the default flag unique per user."""
     db = await get_db()
     now = time.time()
-    # 修复 D3：显式事务，防止清默认后更新失败导致所有默认签名丢失
     await db.execute("BEGIN")
     try:
         if sig.is_default:
@@ -1097,8 +875,7 @@ async def update_signature(sig: Signature) -> bool:
             """UPDATE signatures SET name = ?, content_html = ?, is_default = ?,
                account_id = ?, updated_at = ?
                WHERE id = ?""",
-            (sig.name, sig.content_html, 1 if sig.is_default else 0,
-             sig.account_id or "", now, sig.id)
+            (sig.name, sig.content_html, 1 if sig.is_default else 0, sig.account_id or "", now, sig.id)
         )
         await db.execute("COMMIT")
     except Exception:
@@ -1108,189 +885,18 @@ async def update_signature(sig: Signature) -> bool:
 
 
 async def delete_signature(sig_id: int, user_uid: str = "") -> bool:
-    """删除签名模板，返回是否成功。传入 user_uid 时校验归属。"""
     db = await get_db()
+    sql = "DELETE FROM signatures WHERE id = ?"
+    params: list[Any] = [sig_id]
     if user_uid:
-        cursor = await db.execute("DELETE FROM signatures WHERE id = ? AND user_uid = ?", (sig_id, user_uid))
-    else:
-        cursor = await db.execute("DELETE FROM signatures WHERE id = ?", (sig_id,))
+        sql += " AND user_uid = ?"
+        params.append(user_uid)
+    cursor = await db.execute(sql, params)
     await db.commit()
     return cursor.rowcount > 0
 
 
-# ==================== 聚合收件箱查询 ====================
-
-async def get_unified_inbox_messages(
-    user_uid: str,
-    account_ids: list,
-    page: int = 1,
-    page_size: int = 40,
-    account_filter: str = "",
-    read_filter: str = "",
-    attachment_filter: bool = False,
-) -> dict:
-    """从缓存中聚合多个账号的收件箱邮件，按时间倒序排列
-
-    复用 cached_messages 表中的缓存数据，不需要额外的缓存逻辑。
-    现有缓存同步机制（IDLE监听、增量同步）已在维护 INBOX 的缓存数据。
-
-    参数：
-        user_uid: 飞牛OS用户ID
-        account_ids: 要聚合的账号ID列表
-        page: 页码（从1开始）
-        page_size: 每页数量
-        account_filter: 按账号ID进一步筛选，空=全部
-        read_filter: "unread"=仅未读, "read"=仅已读, 空=全部
-        attachment_filter: True=仅有附件的邮件
-    """
-    if not account_ids:
-        return {"messages": [], "total": 0, "unread_total": 0, "page": page, "page_size": page_size}
-
-    db = await get_db()
-    # where_clause 通过字符串拼接构建，但 conditions 列表中的条件均为硬编码字符串（不接受用户输入），SQL 注入安全
-    conditions = ["user_uid = ?", "folder = 'INBOX'"]
-    params: list = [user_uid]
-
-    # 限定聚合的账号范围
-    placeholders = ",".join("?" * len(account_ids))
-    conditions.append(f"account_id IN ({placeholders})")
-    params.extend(account_ids)
-
-    # 按账号进一步筛选
-    if account_filter and account_filter in account_ids:
-        conditions.append("account_id = ?")
-        params.append(account_filter)
-
-    # 按已读/未读筛选
-    if read_filter == "unread":
-        conditions.append("is_read = 0")
-    elif read_filter == "read":
-        conditions.append("is_read = 1")
-
-    # 按附件筛选
-    if attachment_filter:
-        conditions.append("has_attachments = 1")
-
-    where_clause = " AND ".join(conditions)
-
-    # 合并 total 和 unread COUNT 为单次查询，减少一次全表扫描
-    cursor = await db.execute(
-        f"SELECT COUNT(*), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM cached_messages WHERE {where_clause}",
-        params
-    )
-    row = await cursor.fetchone()
-    total = row[0] or 0
-    unread_total = row[1] or 0
-
-    # 分页查询（按日期倒序，最新的在前）
-    offset = (page - 1) * page_size
-    cursor = await db.execute(
-        f"""SELECT id, uid, subject, from_addr, to_addr, date, is_read, is_starred, folder, account_id, has_attachments
-           FROM cached_messages
-           WHERE {where_clause}
-           ORDER BY date DESC
-           LIMIT ? OFFSET ?""",
-        params + [page_size, offset],
-    )
-    rows = await cursor.fetchall()
-    messages = [
-        {
-            "id": str(row[1]),  # 返回 str(uid)
-            "uid": row[1],
-            "subject": row[2],
-            "from_addr": row[3],
-            "to_addr": row[4],
-            "date": row[5],
-            "is_read": bool(row[6]),
-            "is_starred": bool(row[7]),
-            "folder": row[8],
-            "account_id": row[9],  # 聚合视图需要知道每封邮件的所属账号
-            "has_attachments": bool(row[10]),
-        }
-        for row in rows
-    ]
-
-    return {
-        "messages": messages,
-        "total": total,
-        "unread_total": unread_total,
-        "page": page,
-        "page_size": page_size,
-    }
-
-
-async def get_unified_inbox_filter_counts(user_uid: str, account_ids: list, account_filter: str = "") -> dict:
-    """获取聚合收件箱各筛选条件的计数
-
-    一次查询返回 all、unread、read、attachments 四个维度的计数，
-    避免前端多次请求。
-    """
-    if not account_ids:
-        return {"all": 0, "unread": 0, "read": 0, "attachments": 0}
-
-    db = await get_db()
-    placeholders = ",".join("?" * len(account_ids))
-    conditions = [f"user_uid = ?", "folder = 'INBOX'", f"account_id IN ({placeholders})"]
-    base_params = [user_uid] + account_ids
-
-    # 按账号进一步筛选
-    if account_filter and account_filter in account_ids:
-        conditions.append("account_id = ?")
-        base_params.append(account_filter)
-
-    where_clause = " AND ".join(conditions)
-
-    # 一次查询获取所有计数
-    cursor = await db.execute(
-        f"""SELECT
-            COUNT(*) as all_count,
-            SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) as unread_count,
-            SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) as read_count,
-            SUM(CASE WHEN has_attachments = 1 THEN 1 ELSE 0 END) as attachment_count
-           FROM cached_messages
-           WHERE {where_clause}""",
-        base_params,
-    )
-    row = await cursor.fetchone()
-    return {
-        "all": row[0] if row else 0,
-        "unread": row[1] if row else 0,
-        "read": row[2] if row else 0,
-        "attachments": row[3] if row else 0,
-    }
-
-
-async def get_unified_inbox_stats(user_uid: str, account_ids: list) -> dict:
-    """聚合指定账号 INBOX 的 total_count 和 unread_count
-
-    从 folder_stats 表中汇总，比 COUNT(cached_messages) 更准确（因为缓存可能只存了部分邮件）。
-    """
-    if not account_ids:
-        return {"total_count": 0, "unread_count": 0}
-
-    db = await get_db()
-    placeholders = ",".join("?" * len(account_ids))
-    cursor = await db.execute(
-        f"""SELECT COALESCE(SUM(total_count), 0), COALESCE(SUM(unread_count), 0)
-           FROM folder_stats
-           WHERE folder = 'INBOX' AND account_id IN ({placeholders})""",
-        account_ids,
-    )
-    row = await cursor.fetchone()
-    return {
-        "total_count": row[0] if row else 0,
-        "unread_count": row[1] if row else 0,
-    }
-
-
-# ==================== 用户级配置（D1 修复） ====================
-
-
 async def get_user_setting(user_uid: str, key: str, default: Any = None) -> Any:
-    """读取单个用户级配置项
-
-    value 以 JSON 字符串存储，读取时还原为原始类型。
-    """
     db = await get_db()
     cursor = await db.execute(
         "SELECT value FROM user_settings WHERE user_uid = ? AND key = ?",
@@ -1306,7 +912,6 @@ async def get_user_setting(user_uid: str, key: str, default: Any = None) -> Any:
 
 
 async def set_user_setting(user_uid: str, key: str, value: Any) -> None:
-    """写入单个用户级配置项（upsert 语义）"""
     db = await get_db()
     value_json = json.dumps(value, ensure_ascii=False)
     await db.execute(
@@ -1319,12 +924,6 @@ async def set_user_setting(user_uid: str, key: str, value: Any) -> None:
 
 
 async def get_user_settings(user_uid: str, keys: Optional[List[str]] = None) -> dict:
-    """批量读取用户级配置，返回 dict
-
-    Args:
-        user_uid: 用户 ID
-        keys: 要读取的 key 列表，None 表示读取该用户全部配置
-    """
     db = await get_db()
     if keys:
         placeholders = ",".join("?" * len(keys))
@@ -1343,12 +942,12 @@ async def get_user_settings(user_uid: str, keys: Optional[List[str]] = None) -> 
         try:
             result[row[0]] = json.loads(row[1])
         except (json.JSONDecodeError, TypeError):
-            logger.debug("用户配置解析失败 user_uid=%s key=%s", user_uid, row[0])
+            logger.debug("decode user setting failed: user_uid=%s key=%s", user_uid, row[0])
     return result
 
 
 async def set_user_settings(user_uid: str, settings: dict) -> None:
-    """批量写入用户级配置（upsert 语义）"""
+    """Batch upsert user settings."""
     db = await get_db()
     now = time.time()
     for key, value in settings.items():
@@ -1366,14 +965,15 @@ async def create_history_sync_job(job: dict) -> None:
     db = await get_db()
     await db.execute(
         """INSERT INTO history_sync_jobs
-           (id, account_id, user_uid, status, current_folder, current_page, current_uid,
+           (id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
             total_folders, completed_folders, fetched_messages, downloaded_attachments,
             downloaded_inline_images, error_message, created_at, updated_at, finished_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job["id"],
             job["account_id"],
             job["user_uid"],
+            job.get("job_type", "history_sync"),
             job.get("status", "pending"),
             job.get("current_folder", ""),
             job.get("current_page", 1),
@@ -1406,7 +1006,7 @@ async def update_history_sync_job(job_id: str, **fields) -> None:
 async def get_history_sync_job(account_id: str) -> Optional[dict]:
     db = await get_db()
     cursor = await db.execute(
-        """SELECT id, account_id, user_uid, status, current_folder, current_page, current_uid,
+        """SELECT id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
                   total_folders, completed_folders, fetched_messages, downloaded_attachments,
                   downloaded_inline_images, error_message, created_at, updated_at, finished_at
            FROM history_sync_jobs
@@ -1425,7 +1025,7 @@ async def get_history_sync_job(account_id: str) -> Optional[dict]:
 async def get_history_sync_job_by_id(job_id: str) -> Optional[dict]:
     db = await get_db()
     cursor = await db.execute(
-        """SELECT id, account_id, user_uid, status, current_folder, current_page, current_uid,
+        """SELECT id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
                   total_folders, completed_folders, fetched_messages, downloaded_attachments,
                   downloaded_inline_images, error_message, created_at, updated_at, finished_at
            FROM history_sync_jobs
@@ -1443,7 +1043,7 @@ async def get_history_sync_job_by_id(job_id: str) -> Optional[dict]:
 async def list_history_sync_jobs(user_uid: str) -> List[dict]:
     db = await get_db()
     cursor = await db.execute(
-        """SELECT id, account_id, user_uid, status, current_folder, current_page, current_uid,
+        """SELECT id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
                   total_folders, completed_folders, fetched_messages, downloaded_attachments,
                   downloaded_inline_images, error_message, created_at, updated_at, finished_at
            FROM history_sync_jobs
@@ -1454,6 +1054,16 @@ async def list_history_sync_jobs(user_uid: str) -> List[dict]:
     rows = await cursor.fetchall()
     columns = [description[0] for description in cursor.description]
     return [dict(zip(columns, row)) for row in rows]
+
+
+async def delete_history_sync_jobs_by_account(account_id: str) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        "DELETE FROM history_sync_jobs WHERE account_id = ?",
+        (account_id,),
+    )
+    await db.commit()
+    return cursor.rowcount
 
 
 async def list_users() -> List[User]:
@@ -1500,6 +1110,13 @@ async def create_user(user: User) -> User:
     return user
 
 
+async def delete_user(user_id: str) -> bool:
+    db = await get_db()
+    cursor = await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 async def update_user_password(user_id: str, password_hash: str) -> bool:
     db = await get_db()
     cursor = await db.execute(
@@ -1516,5 +1133,713 @@ async def update_user_status(user_id: str, status: str) -> bool:
         "UPDATE users SET status = ?, updated_at = ? WHERE id = ?",
         (status, time.time(), user_id),
     )
+    await db.commit()
+    return cursor.rowcount > 0
+
+# ==================== Rebuilt compatibility layer ====================
+
+def _row_to_dict(cursor, row):
+    if not row:
+        return None
+    columns = [description[0] for description in cursor.description]
+    return dict(zip(columns, row))
+
+
+def _expand_folder_aliases(folder: str) -> list[str]:
+    folder = (folder or '').strip() or 'INBOX'
+    alias_groups = [
+        {'INBOX', 'Inbox'},
+        {'Sent', 'Sent Mail', 'Sent Messages', 'Sent Items', '[Gmail]/Sent Mail', '[Google Mail]/Sent Mail', '已发送'},
+        {'Drafts', '[Gmail]/Drafts', '[Google Mail]/Drafts', '草稿箱'},
+        {'Junk', 'Junk Email', 'Spam', '[Gmail]/Spam', '[Google Mail]/Spam', '垃圾邮件'},
+        {'Trash', 'Deleted', 'Deleted Items', 'Deleted Messages', '[Gmail]/Trash', '已删除'},
+    ]
+    folder_lower = folder.lower()
+    for group in alias_groups:
+        if any(folder_lower == item.lower() for item in group):
+            return sorted(group)
+    return [folder]
+
+
+async def _get_folder_stats_by_aliases(account_id: str, folder: str) -> dict:
+    aliases = _expand_folder_aliases(folder)
+    db = await get_db()
+    placeholders = ','.join('?' * len(aliases))
+    cursor = await db.execute(
+        f'''SELECT COALESCE(MAX(total_count), 0),
+                   COALESCE(MAX(unread_count), 0),
+                   COALESCE(MAX(updated_at), 0)
+            FROM folder_stats
+            WHERE account_id = ? AND folder IN ({placeholders})''',
+        [account_id] + aliases,
+    )
+    row = await cursor.fetchone()
+    if row:
+        return {'total_count': int(row[0] or 0), 'unread_count': int(row[1] or 0), 'updated_at': float(row[2] or 0)}
+    return {'total_count': 0, 'unread_count': 0, 'updated_at': 0}
+
+
+async def get_account_by_id(account_id: str):
+    db = await get_db()
+    cursor = await db.execute('SELECT * FROM accounts WHERE id = ? LIMIT 1', (account_id,))
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    return Account(**_row_to_dict(cursor, row))
+
+
+async def get_accounts(user_uid: str) -> List[Account]:
+    db = await get_db()
+    cursor = await db.execute(
+        'SELECT * FROM accounts WHERE user_uid = ? ORDER BY created_at ASC',
+        (user_uid,),
+    )
+    rows = await cursor.fetchall()
+    columns = [description[0] for description in cursor.description]
+    return [Account(**dict(zip(columns, row))) for row in rows]
+
+
+async def activate_account(account_id: str, user_uid: str = '') -> bool:
+    db = await get_db()
+    sql = 'UPDATE accounts SET status = ?, updated_at = ? WHERE id = ?'
+    params = ['active', time.time(), account_id]
+    if user_uid:
+        sql += ' AND user_uid = ?'
+        params.append(user_uid)
+    cursor = await db.execute(sql, params)
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def deactivate_account(account_id: str, user_uid: str = '') -> bool:
+    db = await get_db()
+    sql = 'UPDATE accounts SET status = ?, updated_at = ? WHERE id = ?'
+    params = ['offline', time.time(), account_id]
+    if user_uid:
+        sql += ' AND user_uid = ?'
+        params.append(user_uid)
+    cursor = await db.execute(sql, params)
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def update_account_credentials(account_id: str, credentials_json: str) -> bool:
+    db = await get_db()
+    cursor = await db.execute(
+        'UPDATE accounts SET credentials_json = ?, updated_at = ? WHERE id = ?',
+        (credentials_json, time.time(), account_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def update_account_info(
+    account_id: str,
+    user_uid: str,
+    remark: str = '',
+    group_name: str = '',
+    hide_email: bool = False,
+    poll_interval_seconds: int = 10,
+) -> bool:
+    db = await get_db()
+    interval = min(3600, max(5, int(poll_interval_seconds or 10)))
+    cursor = await db.execute(
+        '''UPDATE accounts
+           SET remark = ?, group_name = ?, hide_email = ?, poll_interval_seconds = ?, updated_at = ?
+           WHERE id = ? AND user_uid = ?''',
+        (remark, group_name, 1 if hide_email else 0, interval, time.time(), account_id, user_uid),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def delete_cached_messages_by_account(account_id: str) -> int:
+    db = await get_db()
+    cursor = await db.execute('DELETE FROM cached_messages WHERE account_id = ?', (account_id,))
+    await db.commit()
+    return cursor.rowcount
+
+
+async def delete_cached_attachments_by_account(account_id: str) -> int:
+    db = await get_db()
+    cursor = await db.execute('DELETE FROM cached_attachments WHERE account_id = ?', (account_id,))
+    await db.commit()
+    return cursor.rowcount
+
+
+async def get_max_cached_uid(user_uid: str, account_id: str, folder: str) -> int:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT COALESCE(MAX(uid), 0)
+            FROM cached_messages
+            WHERE user_uid = ? AND account_id = ? AND folder IN ({placeholders})''',
+        [user_uid, account_id] + aliases,
+    )
+    row = await cursor.fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
+async def get_cached_count(account_id: str, folder: str) -> int:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'SELECT COUNT(*) FROM cached_messages WHERE account_id = ? AND folder IN ({placeholders})',
+        [account_id] + aliases,
+    )
+    row = await cursor.fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
+async def get_cached_body_count(account_id: str, folder: str) -> int:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT COUNT(*)
+            FROM cached_messages
+            WHERE account_id = ? AND folder IN ({placeholders})
+              AND (COALESCE(body_text, '') <> '' OR COALESCE(body_html, '') <> '')''',
+        [account_id] + aliases,
+    )
+    row = await cursor.fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
+async def get_cached_attachment_rows(account_id: str) -> list[dict]:
+    db = await get_db()
+    cursor = await db.execute(
+        '''SELECT is_inline, local_path
+           FROM cached_attachments
+           WHERE account_id = ?''',
+        (account_id,),
+    )
+    rows = await cursor.fetchall()
+    return [{"is_inline": bool(row[0]), "local_path": row[1] or ""} for row in rows]
+
+
+async def get_cached_is_read(account_id: str, uid: int, folder: str) -> Optional[bool]:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT is_read FROM cached_messages
+            WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})
+            LIMIT 1''',
+        [account_id, uid] + aliases,
+    )
+    row = await cursor.fetchone()
+    return bool(row[0]) if row else None
+
+
+async def get_cached_message_detail(account_id: str, uid: int, folder: str):
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT id, uid, subject, from_addr, to_addr, date, is_read, is_starred, folder,
+                   body_text, body_html, has_attachments, account_id, storage_path
+            FROM cached_messages
+            WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})
+            ORDER BY date DESC LIMIT 1''',
+        [account_id, uid] + aliases,
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    return {
+        'id': str(row[1]),
+        'uid': row[1],
+        'subject': row[2] or '',
+        'from_addr': row[3] or '',
+        'to_addr': row[4] or '',
+        'date': row[5] or '',
+        'is_read': bool(row[6]),
+        'is_starred': bool(row[7]),
+        'folder': row[8] or folder,
+        'body_text': row[9] or '',
+        'body_html': row[10] or '',
+        'has_attachments': bool(row[11]),
+        'account_id': row[12] or account_id,
+        'storage_path': row[13] or '',
+        'attachments': [],
+    }
+
+
+async def get_cached_attachment(account_id: str, uid: int, folder: str, part_number: int):
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT account_id, uid, folder, part_number, filename, content_type, size, content_id, is_inline, local_path
+            FROM cached_attachments
+            WHERE account_id = ? AND uid = ? AND folder IN ({placeholders}) AND part_number = ?
+            LIMIT 1''',
+        [account_id, uid] + aliases + [part_number],
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    return {
+        'account_id': row[0], 'uid': row[1], 'folder': row[2], 'part_number': row[3],
+        'filename': row[4] or '', 'content_type': row[5] or '', 'size': row[6] or 0,
+        'content_id': row[7] or '', 'is_inline': bool(row[8]), 'local_path': row[9] or '',
+    }
+
+
+async def list_cached_attachments(account_id: str, uid: int, folder: str):
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT part_number, filename, content_type, size, content_id, is_inline, local_path
+            FROM cached_attachments
+            WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})
+            ORDER BY part_number ASC''',
+        [account_id, uid] + aliases,
+    )
+    rows = await cursor.fetchall()
+    return [
+        {
+            'part_number': row[0], 'filename': row[1] or '', 'content_type': row[2] or '',
+            'size': row[3] or 0, 'content_id': row[4] or '', 'is_inline': bool(row[5]), 'local_path': row[6] or '',
+        }
+        for row in rows
+    ]
+
+
+async def update_cached_message_storage_path(account_id: str, uid: int, folder: str, storage_path: str) -> bool:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''UPDATE cached_messages SET storage_path = ?, cached_at = ?
+            WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})''',
+        [storage_path, time.time(), account_id, uid] + aliases,
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def update_cached_message_read(account_id: str, uid: int, folder: str, is_read: bool) -> bool:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''UPDATE cached_messages SET is_read = ?, cached_at = ?
+            WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})''',
+        [1 if is_read else 0, time.time(), account_id, uid] + aliases,
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def batch_update_cached_messages_read(account_id: str, uids: list[int], folder: str, is_read: bool) -> int:
+    if not uids:
+        return 0
+    aliases = _expand_folder_aliases(folder)
+    db = await get_db()
+    affected = 0
+    for uid in uids:
+        placeholders = ','.join('?' * len(aliases))
+        cursor = await db.execute(
+            f'''UPDATE cached_messages SET is_read = ?, cached_at = ?
+                WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})''',
+            [1 if is_read else 0, time.time(), account_id, uid] + aliases,
+        )
+        affected += cursor.rowcount
+    await db.commit()
+    return affected
+
+
+async def batch_update_is_read(account_id: str, folder: str, updates: list[tuple[int, int]]) -> int:
+    if not updates:
+        return 0
+    aliases = _expand_folder_aliases(folder)
+    db = await get_db()
+    affected = 0
+    for uid, is_read in updates:
+        placeholders = ','.join('?' * len(aliases))
+        cursor = await db.execute(
+            f'''UPDATE cached_messages SET is_read = ?, cached_at = ?
+                WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})''',
+            [is_read, time.time(), account_id, uid] + aliases,
+        )
+        affected += cursor.rowcount
+    await db.commit()
+    return affected
+
+
+async def delete_cached_message(account_id: str, uid: int, folder: str) -> bool:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'DELETE FROM cached_messages WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})',
+        [account_id, uid] + aliases,
+    )
+    await db.execute(
+        f'DELETE FROM cached_attachments WHERE account_id = ? AND uid = ? AND folder IN ({placeholders})',
+        [account_id, uid] + aliases,
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def batch_delete_cached_messages(account_id: str, uids: list[int], folder: str) -> int:
+    if not uids:
+        return 0
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    uid_placeholders = ','.join('?' * len(uids))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''DELETE FROM cached_messages WHERE account_id = ? AND folder IN ({placeholders}) AND uid IN ({uid_placeholders})''',
+        [account_id] + aliases + uids,
+    )
+    await db.execute(
+        f'''DELETE FROM cached_attachments WHERE account_id = ? AND folder IN ({placeholders}) AND uid IN ({uid_placeholders})''',
+        [account_id] + aliases + uids,
+    )
+    await db.commit()
+    return cursor.rowcount
+
+
+async def purge_deleted_from_cache(account_id: str, folder: str, valid_uids: set[int]) -> int:
+    aliases = _expand_folder_aliases(folder)
+    placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'SELECT uid FROM cached_messages WHERE account_id = ? AND folder IN ({placeholders})',
+        [account_id] + aliases,
+    )
+    rows = await cursor.fetchall()
+    cached_uids = {int(row[0]) for row in rows if row and row[0] is not None}
+    to_delete = sorted(cached_uids - set(valid_uids))
+    if not to_delete:
+        return 0
+    return await batch_delete_cached_messages(account_id, to_delete, folder)
+
+
+async def upsert_cached_messages(messages: list[CachedMessage]) -> int:
+    if not messages:
+        return 0
+    db = await get_db()
+    affected = 0
+    for msg in messages:
+        message_id = build_cached_message_id(msg.account_id, msg.folder, msg.uid)
+        body_text = _truncate_text_bytes(msg.body_text or '', DB_MESSAGE_BODY_MAX_BYTES)
+        body_html = _truncate_text_bytes(msg.body_html or '', DB_MESSAGE_BODY_MAX_BYTES)
+        cursor = await db.execute(
+            '''INSERT INTO cached_messages
+               (id, account_id, user_uid, uid, folder, subject, from_addr, to_addr, date,
+                is_read, is_starred, has_attachments, body_text, body_html, storage_path, cached_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE
+               subject = VALUES(subject),
+               from_addr = VALUES(from_addr),
+               to_addr = VALUES(to_addr),
+               date = VALUES(date),
+               is_read = VALUES(is_read),
+               is_starred = VALUES(is_starred),
+               has_attachments = VALUES(has_attachments),
+               body_text = COALESCE(VALUES(body_text), cached_messages.body_text),
+               body_html = COALESCE(VALUES(body_html), cached_messages.body_html),
+               storage_path = COALESCE(VALUES(storage_path), cached_messages.storage_path),
+               cached_at = VALUES(cached_at)''',
+            (
+                message_id, msg.account_id, msg.user_uid, msg.uid, msg.folder, msg.subject,
+                msg.from_addr, msg.to_addr, msg.date, 1 if msg.is_read else 0,
+                1 if msg.is_starred else 0, 1 if msg.has_attachments else 0,
+                body_text, body_html, msg.storage_path or '', msg.cached_at or time.time(),
+            ),
+        )
+        affected += cursor.rowcount
+    await db.commit()
+    return affected
+
+
+async def upsert_cached_attachments(attachments: list[CachedAttachment]) -> int:
+    if not attachments:
+        return 0
+    db = await get_db()
+    affected = 0
+    for att in attachments:
+        cursor = await db.execute(
+            '''INSERT INTO cached_attachments
+               (account_id, user_uid, uid, folder, part_number, filename, content_type, size, content_id, is_inline, local_path, cached_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE
+               filename = VALUES(filename),
+               content_type = VALUES(content_type),
+               size = VALUES(size),
+               content_id = VALUES(content_id),
+               is_inline = VALUES(is_inline),
+               local_path = VALUES(local_path),
+               cached_at = VALUES(cached_at)''',
+            (
+                att.account_id, att.user_uid, att.uid, att.folder, att.part_number,
+                att.filename or '', att.content_type or '', att.size or 0,
+                att.content_id or '', 1 if att.is_inline else 0, att.local_path or '', att.cached_at or time.time(),
+            ),
+        )
+        affected += cursor.rowcount
+    await db.commit()
+    return affected
+
+
+async def get_cached_messages_by_folder(user_uid: str, account_id: str, folder: str, page: int = 1, page_size: int = 40, read_filter: str = '', attachment_filter: bool = False) -> dict:
+    db = await get_db()
+    aliases = _expand_folder_aliases(folder)
+    folder_placeholders = ','.join('?' * len(aliases))
+    conditions = ['user_uid = ?', 'account_id = ?', f'folder IN ({folder_placeholders})']
+    params = [user_uid, account_id] + aliases
+    if read_filter == 'unread':
+        conditions.append('is_read = 0')
+    elif read_filter == 'read':
+        conditions.append('is_read = 1')
+    if attachment_filter:
+        conditions.append('has_attachments = 1')
+    where_clause = ' AND '.join(conditions)
+    cursor = await db.execute(f'SELECT COUNT(*) FROM cached_messages WHERE {where_clause}', params)
+    filtered_total = int((await cursor.fetchone())[0] or 0)
+    cursor = await db.execute(
+        f'''SELECT COUNT(*)
+            FROM cached_messages
+            WHERE user_uid = ? AND account_id = ? AND folder IN ({folder_placeholders}) AND is_read = 0''',
+        [user_uid, account_id] + aliases,
+    )
+    unread_total = int((await cursor.fetchone())[0] or 0)
+    total = filtered_total
+    offset = max(0, (page - 1) * page_size)
+    cursor = await db.execute(
+        f'''SELECT id, uid, subject, from_addr, to_addr, date, is_read, is_starred, folder, has_attachments, account_id
+            FROM cached_messages WHERE {where_clause}
+            ORDER BY date DESC, uid DESC LIMIT ? OFFSET ?''',
+        params + [page_size, offset],
+    )
+    rows = await cursor.fetchall()
+    messages = [{'id': str(row[1]), 'uid': row[1], 'subject': row[2] or '', 'from_addr': row[3] or '', 'to_addr': row[4] or '', 'date': row[5] or '', 'is_read': bool(row[6]), 'is_starred': bool(row[7]), 'folder': row[8] or folder, 'has_attachments': bool(row[9]), 'account_id': row[10] or account_id} for row in rows]
+    result = {'messages': messages, 'total': total, 'unread_total': unread_total, 'page': page, 'page_size': page_size}
+    result['cached_count'] = filtered_total
+    return result
+
+
+async def search_cached_messages_by_folder(user_uid: str, account_id: str, folder: str, keyword: str, page: int = 1, page_size: int = 40, read_filter: str = '', attachment_filter: bool = False) -> dict:
+    trimmed = (keyword or '').strip()
+    if not trimmed:
+        return await get_cached_messages_by_folder(user_uid, account_id, folder, page, page_size, read_filter, attachment_filter)
+    aliases = _expand_folder_aliases(folder)
+    folder_placeholders = ','.join('?' * len(aliases))
+    conditions = ['user_uid = ?', 'account_id = ?', f'folder IN ({folder_placeholders})', '(subject LIKE ? OR from_addr LIKE ? OR to_addr LIKE ? OR body_text LIKE ? OR body_html LIKE ?)']
+    like = '%' + trimmed + '%'
+    params = [user_uid, account_id] + aliases + [like, like, like, like, like]
+    if read_filter == 'unread':
+        conditions.append('is_read = 0')
+    elif read_filter == 'read':
+        conditions.append('is_read = 1')
+    if attachment_filter:
+        conditions.append('has_attachments = 1')
+    where_clause = ' AND '.join(conditions)
+    db = await get_db()
+    cursor = await db.execute(f'''SELECT COUNT(*), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM cached_messages WHERE {where_clause}''', params)
+    row = await cursor.fetchone()
+    total = int(row[0] or 0) if row else 0
+    unread_total = int(row[1] or 0) if row else 0
+    offset = max(0, (page - 1) * page_size)
+    cursor = await db.execute(f'''SELECT id, uid, subject, from_addr, to_addr, date, is_read, is_starred, folder, has_attachments, account_id FROM cached_messages WHERE {where_clause} ORDER BY date DESC, uid DESC LIMIT ? OFFSET ?''', params + [page_size, offset])
+    rows = await cursor.fetchall()
+    messages = [{'id': str(row[1]), 'uid': row[1], 'subject': row[2] or '', 'from_addr': row[3] or '', 'to_addr': row[4] or '', 'date': row[5] or '', 'is_read': bool(row[6]), 'is_starred': bool(row[7]), 'folder': row[8] or folder, 'has_attachments': bool(row[9]), 'account_id': row[10] or account_id} for row in rows]
+    return {'messages': messages, 'total': total, 'unread_total': unread_total, 'page': page, 'page_size': page_size}
+
+
+async def get_folder_filter_counts(user_uid: str, account_id: str, folder: str) -> dict:
+    aliases = _expand_folder_aliases(folder)
+    folder_placeholders = ','.join('?' * len(aliases))
+    db = await get_db()
+    cursor = await db.execute(
+        f'''SELECT COUNT(*),
+                   SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN has_attachments = 1 THEN 1 ELSE 0 END)
+            FROM cached_messages
+            WHERE user_uid = ? AND account_id = ? AND folder IN ({folder_placeholders})''',
+        [user_uid, account_id] + aliases,
+    )
+    row = await cursor.fetchone()
+    return {
+        'all': int(row[0] or 0) if row else 0,
+        'unread': int(row[1] or 0) if row else 0,
+        'read': int(row[2] or 0) if row else 0,
+        'attachments': int(row[3] or 0) if row else 0,
+    }
+
+
+async def create_notification(notification: Notification) -> Notification:
+    db = await get_db()
+    await db.execute('''INSERT INTO notifications (id, user_uid, account_id, provider, email, folder, is_read, created_at, type, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (notification.id, notification.user_uid, notification.account_id, notification.provider, notification.email, notification.folder, 1 if notification.is_read else 0, notification.created_at, notification.type, notification.message))
+    await db.commit()
+    return notification
+
+
+async def get_notifications(user_uid: str, limit: int = 50) -> List[Notification]:
+    db = await get_db()
+    cursor = await db.execute('SELECT id, user_uid, account_id, provider, email, folder, is_read, created_at, type, message FROM notifications WHERE user_uid = ? ORDER BY created_at DESC LIMIT ?', (user_uid, limit))
+    rows = await cursor.fetchall()
+    return [Notification(**dict(zip([d[0] for d in cursor.description], row))) for row in rows]
+
+
+async def mark_notification_read(notification_id: str, user_uid: str) -> bool:
+    db = await get_db()
+    cursor = await db.execute('UPDATE notifications SET is_read = 1 WHERE id = ? AND user_uid = ?', (notification_id, user_uid))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def mark_all_notifications_read(user_uid: str) -> int:
+    db = await get_db()
+    cursor = await db.execute('UPDATE notifications SET is_read = 1 WHERE user_uid = ? AND is_read = 0', (user_uid,))
+    await db.commit()
+    return cursor.rowcount
+
+
+async def clear_notifications(user_uid: str) -> int:
+    db = await get_db()
+    cursor = await db.execute('DELETE FROM notifications WHERE user_uid = ?', (user_uid,))
+    await db.commit()
+    return cursor.rowcount
+
+
+async def get_signatures(user_uid: str = '') -> List[Signature]:
+    db = await get_db()
+    if user_uid:
+        cursor = await db.execute('SELECT * FROM signatures WHERE user_uid = ? ORDER BY is_default DESC, id ASC', (user_uid,))
+    else:
+        cursor = await db.execute('SELECT * FROM signatures ORDER BY is_default DESC, id ASC')
+    rows = await cursor.fetchall()
+    return [Signature(**dict(zip([d[0] for d in cursor.description], row))) for row in rows]
+
+
+async def create_signature(sig: Signature) -> Signature:
+    db = await get_db()
+    now = time.time()
+    await db.execute('BEGIN')
+    try:
+        if sig.is_default:
+            await db.execute('UPDATE signatures SET is_default = 0 WHERE user_uid = ?', (sig.user_uid or '',))
+        cursor = await db.execute('''INSERT INTO signatures (name, content_html, is_default, account_id, user_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)''', (sig.name, sig.content_html, 1 if sig.is_default else 0, sig.account_id or '', sig.user_uid or '', now, now))
+        await db.execute('COMMIT')
+    except Exception:
+        await db.execute('ROLLBACK')
+        raise
+    sig.id = cursor.lastrowid
+    sig.created_at = now
+    sig.updated_at = now
+    return sig
+
+
+def _history_job_row_to_dict(columns: list[str], row) -> dict[str, Any]:
+    return dict(zip(columns, row))
+
+
+async def get_history_sync_job(account_id: str, job_type: str = "history_sync") -> Optional[dict]:
+    db = await get_db()
+    cursor = await db.execute(
+        """SELECT id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
+                  total_folders, completed_folders, fetched_messages, downloaded_attachments,
+                  downloaded_inline_images, error_message, created_at, updated_at, finished_at
+           FROM history_sync_jobs
+           WHERE account_id = ? AND job_type = ?
+           ORDER BY updated_at DESC, created_at DESC
+           LIMIT 1""",
+        (account_id, job_type),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    columns = [description[0] for description in cursor.description]
+    return _history_job_row_to_dict(columns, row)
+
+
+async def list_history_sync_jobs(user_uid: str, job_type: str | None = None) -> List[dict]:
+    db = await get_db()
+    if job_type:
+        cursor = await db.execute(
+            """SELECT id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
+                      total_folders, completed_folders, fetched_messages, downloaded_attachments,
+                      downloaded_inline_images, error_message, created_at, updated_at, finished_at
+               FROM history_sync_jobs
+               WHERE user_uid = ? AND job_type = ?
+               ORDER BY updated_at DESC, created_at DESC""",
+            (user_uid, job_type),
+        )
+    else:
+        cursor = await db.execute(
+            """SELECT id, account_id, user_uid, job_type, status, current_folder, current_page, current_uid,
+                      total_folders, completed_folders, fetched_messages, downloaded_attachments,
+                      downloaded_inline_images, error_message, created_at, updated_at, finished_at
+               FROM history_sync_jobs
+               WHERE user_uid = ?
+               ORDER BY updated_at DESC, created_at DESC""",
+            (user_uid,),
+        )
+    rows = await cursor.fetchall()
+    columns = [description[0] for description in cursor.description]
+    return [_history_job_row_to_dict(columns, row) for row in rows]
+
+
+async def activate_account(
+    account_id: str,
+    user_uid: str = '',
+    *,
+    credentials_json: str | None = None,
+    status: str = "active",
+) -> bool:
+    db = await get_db()
+    actual_user_uid = user_uid
+    actual_credentials_json = credentials_json
+
+    # Backward compatibility for old call sites:
+    # activate_account(account_id, credentials_json, status="connected")
+    if actual_credentials_json is None and actual_user_uid and actual_user_uid.lstrip().startswith(("{", "[")):
+        actual_credentials_json = actual_user_uid
+        actual_user_uid = ''
+
+    assignments = ["status = ?", "updated_at = ?"]
+    params: list[Any] = [status, time.time()]
+    if actual_credentials_json is not None:
+        assignments.append("credentials_json = ?")
+        params.append(actual_credentials_json)
+    sql = f"UPDATE accounts SET {', '.join(assignments)} WHERE id = ?"
+    params.append(account_id)
+    if actual_user_uid:
+        sql += " AND user_uid = ?"
+        params.append(actual_user_uid)
+    cursor = await db.execute(sql, params)
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def deactivate_account(
+    account_id: str,
+    user_uid: str = '',
+    *,
+    status: str = "offline",
+    clear_credentials: bool = False,
+) -> bool:
+    db = await get_db()
+    assignments = ["status = ?", "updated_at = ?"]
+    params: list[Any] = [status, time.time()]
+    if clear_credentials:
+        assignments.append("credentials_json = ?")
+        params.append("")
+    sql = f"UPDATE accounts SET {', '.join(assignments)} WHERE id = ?"
+    params.append(account_id)
+    if user_uid:
+        sql += " AND user_uid = ?"
+        params.append(user_uid)
+    cursor = await db.execute(sql, params)
     await db.commit()
     return cursor.rowcount > 0

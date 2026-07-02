@@ -31,12 +31,14 @@ from services.settings import async_load_settings
 from services.sync import sync_service
 from services.users import ensure_admin_user
 from utils.logger import get_logger, setup_logging
+from utils.proxy_env import apply_proxy_env
 from version import VERSION
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 ensure_data_dirs()
+apply_proxy_env()
 setup_logging(data_dir=str(LOGS_DIR))
 logger = get_logger("main")
 

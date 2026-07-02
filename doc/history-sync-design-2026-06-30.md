@@ -20,9 +20,9 @@
 
 - 邮件摘要与正文缓存：MySQL `cached_messages`
 - 历史任务进度：MySQL `history_sync_jobs`
-- 原始邮件缓存：`data/history/raw/<account>/<folder>/<uid>.json`
-- 附件缓存：`data/history/attachments/<account>/<uid>/`
-- 内嵌图片缓存：`data/history/inline/<account>/<uid>/`
+- 邮件正文与结构化详情：MySQL `cached_messages`
+- 非图片附件缓存：`data/document/<account>/<year>/<month>/<uid>/`
+- 图片与内嵌图片缓存：`data/picture/<account>/<year>/<month>/<uid>/`
 
 ## 离线查看
 
@@ -37,9 +37,19 @@
 
 - 查看每个邮箱当前同步状态
 - 展示总量、已完成量、当前文件夹、当前页等进度信息
+- 展示各文件夹 `cached_count / total_count`，并用同一口径汇总“已同步邮件”
 - 手动刷新任务状态
 - 暂停同步
 - 继续同步
+
+## 计数口径
+
+- `total_count` 和 `unread_count` 来自 IMAP 文件夹统计，并持久化到 `folder_stats`。
+- `cached_count` 来自本地 `cached_messages`。
+- 历史同步页顶部“已同步邮件”不使用单个任务的累计拉取数，而是使用各文件夹 `cached_count` 与 `total_count` 汇总，避免和子文件夹标签口径不一致。
+- 邮件列表页在线加载时优先使用本地缓存；当缓存不足或远端统计未知时，会刷新当前文件夹的 IMAP 总数和未读数。历史同步页后续刷新会复用这些最新统计。
+- 普通后台新邮件缓存不再累加历史同步任务的 `downloaded_attachments` 和 `downloaded_inline_images`，避免历史同步附件指标被日常收信流程改变。
+- 普通后台新邮件缓存完成后会推送 `cache_updated`，历史同步页收到后即时刷新各文件夹 `cached_count / total_count`。
 
 ## 约束
 

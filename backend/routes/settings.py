@@ -4,11 +4,32 @@
 以及 OAuth 配置诊断接口。
 """
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from deps import get_uid
-from db import get_accounts, get_history_sync_job, list_history_sync_jobs
-from services.history_sync import pause_history_sync, resume_history_sync, start_history_sync
+from db import (
+    get_accounts,
+    get_cached_attachment_rows,
+    get_cached_body_count,
+    get_cached_count,
+    get_folder_stats,
+    get_history_sync_job,
+    list_history_sync_jobs,
+)
+from services.history_sync import (
+    is_full_history_sync_active,
+    pause_history_sync,
+    pause_folder_history_sync,
+    refresh_history_sync_job,
+    resume_history_sync,
+    resume_folder_history_sync,
+    retry_history_sync,
+    start_clear_cache,
+    start_folder_clear_cache,
+    start_folder_history_sync,
+    start_history_sync,
+)
 
 from services.settings import async_load_settings, async_save_settings
 from schemas import (
@@ -16,7 +37,6 @@ from schemas import (
     SettingsResponse,
     SettingsUpdateRequest,
     SettingsUpdateResponse,
-    UnifiedSettingsRequest,
 )
 
 router = APIRouter(tags=["设置"])
@@ -54,6 +74,97 @@ def sync_outlook_config(settings: dict):
 
 
 # ==================== 设置接口 ====================
+
+
+FOLDER_PROGRESS_ITEMS = [
+    ("INBOX", "收件箱"),
+    ("Sent", "已发送"),
+    ("Drafts", "草稿箱"),
+    ("Junk", "垃圾邮件"),
+    ("Trash", "已删除"),
+]
+
+
+async def _build_folder_progress(account_id: str) -> list[dict]:
+    items = []
+    for folder_key, label in FOLDER_PROGRESS_ITEMS:
+        folder_stats = await get_folder_stats(account_id, folder_key)
+        cached_count = await get_cached_count(account_id, folder_key)
+        synced_count = await get_cached_body_count(account_id, folder_key)
+        sync_job = await get_history_sync_job(account_id, job_type=f"folder_sync:{folder_key}")
+        clear_job = await get_history_sync_job(account_id, job_type=f"folder_clear:{folder_key}")
+        total_count = int(folder_stats.get("total_count", 0) or 0)
+        unread_count = int(folder_stats.get("unread_count", 0) or 0)
+        if folder_key == "Sent":
+            unread_count = 0
+        items.append(
+            {
+                "folder": folder_key,
+                "label": label,
+                "cached_count": synced_count,
+                "summary_count": cached_count,
+                "total_count": total_count,
+                "unread_count": unread_count,
+                "is_synced": total_count > 0 and synced_count >= total_count,
+                "sync_job": sync_job,
+                "clear_job": clear_job,
+            }
+        )
+    return items
+
+def _visible_history_job(job: dict | None, folder_progress: list[dict]) -> dict | None:
+    if not job:
+        return None
+    visible = dict(job)
+    if visible.get("status") == "completed" and not any(item["cached_count"] for item in folder_progress):
+        visible.update(
+            {
+                "current_folder": "",
+                "current_page": 1,
+                "current_uid": 0,
+                "total_folders": 0,
+                "completed_folders": 0,
+                "fetched_messages": 0,
+                "downloaded_attachments": 0,
+                "downloaded_inline_images": 0,
+            }
+        )
+    return visible
+
+
+async def _with_local_attachment_counts(account_id: str, job: dict | None) -> dict | None:
+    if not job:
+        return None
+    visible = dict(job)
+    attachments = 0
+    inline_images = 0
+    for item in await get_cached_attachment_rows(account_id):
+        local_path = item.get("local_path") or ""
+        if not local_path or not Path(local_path).exists():
+            continue
+        if item.get("is_inline"):
+            inline_images += 1
+        else:
+            attachments += 1
+    visible["downloaded_attachments"] = attachments
+    visible["downloaded_inline_images"] = inline_images
+    return visible
+
+
+def _latest_job_by_account(jobs: list[dict], job_type: str) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for job in jobs:
+        if job.get("job_type") != job_type:
+            continue
+        if job["account_id"] not in result:
+            result[job["account_id"]] = job
+    return result
+
+
+async def _find_user_account(request: Request, account_id: str):
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    return next((item for item in accounts if item.id == account_id), None)
 
 
 @router.get("/api/settings", response_model=SettingsResponse, summary="获取应用设置")
@@ -161,77 +272,31 @@ async def oauth_diagnostic():
     }
 
 
-# ==================== 聚合收件箱设置 ====================
-
-
-@router.get("/api/settings/unified", summary="获取聚合收件箱设置")
-async def get_unified_settings(request: Request):
-    """获取聚合收件箱的设置：用户选择要聚合的邮箱账号列表
-
-    修复 D1：unified_account_ids 改为按 user_uid 存储在 user_settings 表，避免多用户互相覆盖
-    """
-    from db import get_accounts, get_user_settings
-    from deps import get_uid
-
-    uid = await get_uid(request)
-    accounts = await get_accounts(uid)
-
-    # 从用户级配置表读取（D1 修复）
-    user_settings = await get_user_settings(uid, ["unified_account_ids"])
-    unified_ids = user_settings.get("unified_account_ids", [])
-
-    return {
-        "account_ids": unified_ids,
-        "accounts": [
-            {
-                "id": a.id,
-                "email": a.email,
-                "provider": a.provider,
-                "selected": a.id in unified_ids,
-            }
-            for a in accounts
-        ],
-    }
-
-
-@router.put("/api/settings/unified", summary="保存聚合收件箱设置")
-async def save_unified_settings(request: Request, body: UnifiedSettingsRequest):
-    """保存聚合收件箱的账号ID列表
-
-    修复 D1：unified_account_ids 改为按 user_uid 存储在 user_settings 表，避免多用户互相覆盖
-    """
-    from db import set_user_settings
-    from deps import get_uid
-
-    uid = await get_uid(request)
-    account_ids = body.account_ids
-
-    # 写入用户级配置表（D1 修复）
-    await set_user_settings(uid, {"unified_account_ids": account_ids})
-
-    return {"success": True}
-
-
 @router.get("/api/history-sync/jobs", summary="获取历史邮件同步任务")
 async def get_history_sync_jobs(request: Request):
     uid = await get_uid(request)
     accounts = await get_accounts(uid)
     jobs = await list_history_sync_jobs(uid)
-    latest_by_account: dict[str, dict] = {}
-    for job in jobs:
-        if job["account_id"] not in latest_by_account:
-            latest_by_account[job["account_id"]] = job
+    history_by_account = _latest_job_by_account(jobs, "history_sync")
+    clear_by_account = _latest_job_by_account(jobs, "clear_cache")
 
     items = []
     for account in accounts:
-        job = latest_by_account.get(account.id)
+        folder_progress = await _build_folder_progress(account.id)
+        history_job = await _with_local_attachment_counts(
+            account.id,
+            _visible_history_job(history_by_account.get(account.id), folder_progress),
+        )
+        clear_job = clear_by_account.get(account.id)
         items.append(
             {
                 "account_id": account.id,
                 "email": account.email,
                 "provider": account.provider,
-                "status": job.get("status", "idle") if job else "idle",
-                "job": job,
+                "status": history_job.get("status", "idle") if history_job else "idle",
+                "job": history_job,
+                "clear_job": clear_job,
+                "folder_progress": folder_progress,
             }
         )
     return {"jobs": items}
@@ -243,19 +308,48 @@ async def get_history_sync_job_detail(account_id: str, request: Request):
     accounts = await get_accounts(uid)
     account = next((item for item in accounts if item.id == account_id), None)
     if not account:
-        return {"job": None}
-    job = await get_history_sync_job(account_id)
+        return {"job": None, "clear_job": None}
+    folder_progress = await _build_folder_progress(account.id)
+    job = await _with_local_attachment_counts(
+        account.id,
+        _visible_history_job(await get_history_sync_job(account_id, job_type="history_sync"), folder_progress),
+    )
+    clear_job = await get_history_sync_job(account_id, job_type="clear_cache")
     return {
         "job": job,
+        "clear_job": clear_job,
         "account": {
             "id": account.id,
             "email": account.email,
             "provider": account.provider,
         },
+        "folder_progress": folder_progress,
     }
 
 
-@router.post("/api/history-sync/jobs/{account_id}/start", summary="开始历史邮件同步")
+@router.post("/api/history-sync/jobs/{account_id}/refresh", summary="refresh_history_sync_status")
+async def refresh_history_sync_job_status(account_id: str, request: Request):
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    account = next((item for item in accounts if item.id == account_id), None)
+    if not account:
+        return {"success": False, "message": "account_not_found"}
+    folder_progress = await _build_folder_progress(account.id)
+    job = await _with_local_attachment_counts(
+        account.id,
+        _visible_history_job(await refresh_history_sync_job(account_id), folder_progress),
+    )
+    clear_job = await get_history_sync_job(account_id, job_type="clear_cache")
+    return {
+        "success": True,
+        "job": job,
+        "clear_job": clear_job,
+        "status": job.get("status", "idle") if job else "idle",
+        "folder_progress": folder_progress,
+    }
+
+
+@router.post("/api/history-sync/jobs/{account_id}/start", summary="重置历史邮件同步")
 async def start_history_sync_job(account_id: str, request: Request):
     uid = await get_uid(request)
     accounts = await get_accounts(uid)
@@ -284,3 +378,59 @@ async def resume_history_sync_job(account_id: str, request: Request):
         return {"success": False, "message": "account_not_found"}
     resumed = await resume_history_sync(account_id)
     return {"success": resumed}
+
+
+@router.post("/api/history-sync/jobs/{account_id}/retry", summary="重试历史邮件同步")
+async def retry_history_sync_job(account_id: str, request: Request):
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    if not any(item.id == account_id for item in accounts):
+        return {"success": False, "message": "account_not_found"}
+    retried = await retry_history_sync(account_id)
+    return {"success": retried}
+
+
+@router.post("/api/history-sync/jobs/{account_id}/clear", summary="清空历史邮件本地缓存")
+async def clear_history_sync_cache_job(account_id: str, request: Request):
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    if not any(item.id == account_id for item in accounts):
+        return {"success": False, "message": "account_not_found"}
+    started = await start_clear_cache(account_id)
+    return {"success": started}
+
+
+@router.post("/api/history-sync/jobs/{account_id}/folders/{folder}/start", summary="启动单文件夹历史同步")
+async def start_folder_history_sync_job(account_id: str, folder: str, request: Request):
+    account = await _find_user_account(request, account_id)
+    if not account:
+        return {"success": False, "message": "account_not_found"}
+    started, message = await start_folder_history_sync(account_id, folder, reset=True)
+    return {"success": started, "message": message}
+
+
+@router.post("/api/history-sync/jobs/{account_id}/folders/{folder}/pause", summary="暂停单文件夹历史同步")
+async def pause_folder_history_sync_job(account_id: str, folder: str, request: Request):
+    account = await _find_user_account(request, account_id)
+    if not account:
+        return {"success": False, "message": "account_not_found"}
+    paused, message = await pause_folder_history_sync(account_id, folder)
+    return {"success": paused, "message": message}
+
+
+@router.post("/api/history-sync/jobs/{account_id}/folders/{folder}/resume", summary="继续单文件夹历史同步")
+async def resume_folder_history_sync_job(account_id: str, folder: str, request: Request):
+    account = await _find_user_account(request, account_id)
+    if not account:
+        return {"success": False, "message": "account_not_found"}
+    resumed, message = await resume_folder_history_sync(account_id, folder)
+    return {"success": resumed, "message": message}
+
+
+@router.post("/api/history-sync/jobs/{account_id}/folders/{folder}/clear", summary="清空单文件夹本地缓存")
+async def clear_folder_history_sync_cache_job(account_id: str, folder: str, request: Request):
+    account = await _find_user_account(request, account_id)
+    if not account:
+        return {"success": False, "message": "account_not_found"}
+    started, message = await start_folder_clear_cache(account_id, folder)
+    return {"success": started, "message": message}

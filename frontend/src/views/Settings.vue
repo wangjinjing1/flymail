@@ -654,7 +654,11 @@ onMounted(() => {
 
 <style scoped>
 .settings-page {
+  flex: 1;
+  width: 100%;
   height: 100%;
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   padding: var(--space-6);
   background: var(--bg-secondary);

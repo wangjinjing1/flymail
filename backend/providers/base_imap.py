@@ -15,7 +15,7 @@ import time
 from email.header import decode_header
 from typing import List, Optional, Dict
 import imaplib
-from .base import MailReceiver, Message, Attachment
+from .base import MailReceiver, Message, MessageList, Attachment
 from utils.logger import get_logger
 
 logger = get_logger("imap")
@@ -152,6 +152,7 @@ class BaseIMAPReceiver(MailReceiver):
                 # 从拼接后的完整响应行中提取 FLAGS，检测 \Seen 标志判断已读状态
                 flags_match = re.search(r'FLAGS\s*\(([^)]*)\)', flags_text)
                 is_read = bool(flags_match and "\\Seen" in flags_match.group(1))
+                internal_date = self._parse_internal_date(flags_text)
 
                 if header_bytes:
                     msg = email.message_from_bytes(header_bytes)
@@ -161,7 +162,7 @@ class BaseIMAPReceiver(MailReceiver):
                         subject=self._decode_header(msg.get("Subject", "")),
                         from_addr=self._decode_header(msg.get("From", "")),
                         to_addr=self._decode_header(msg.get("To", "")),
-                        date=self._parse_date(msg.get("Date", "")),
+                        date=self._parse_date(msg.get("Date", ""), fallback=internal_date),
                         is_read=is_read,
                         folder=folder,
                     ))
@@ -210,7 +211,7 @@ class BaseIMAPReceiver(MailReceiver):
                 result.append(part)
         return " ".join(result)
 
-    def _parse_date(self, date_str: str) -> str:
+    def _parse_date(self, date_str: str, fallback: str = "") -> str:
         """解析日期字符串，将 RFC 2822 格式转为 UTC ISO 8601（带 Z 后缀）。
 
         统一转为 UTC 并加 Z 后缀，前端 new Date() 能自动转为本地时区显示。
@@ -224,7 +225,13 @@ class BaseIMAPReceiver(MailReceiver):
             # 加 Z 后缀表示 UTC，前端 new Date("2026-06-09T05:39:00Z") 会自动转为本地时区
             return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         except Exception:
-            return date_str
+            return fallback or ""
+
+    def _parse_internal_date(self, fetch_text: str) -> str:
+        match = re.search(r'INTERNALDATE\s+"([^"]+)"', fetch_text or "", re.IGNORECASE)
+        if not match:
+            return ""
+        return self._parse_date(match.group(1))
 
     # ---- 邮件排序 ----
 
@@ -256,14 +263,17 @@ class BaseIMAPReceiver(MailReceiver):
         if status != "OK":
             raise ValueError(f"无法选择文件夹 {folder}")
         # 用 UID FETCH + BODY.PEEK[] 获取完整邮件内容，不会隐式设置 \Seen 标志
-        status, msg_data = self._conn.uid('FETCH', uid, "(BODY.PEEK[])")
+        status, msg_data = self._conn.uid('FETCH', uid, "(INTERNALDATE BODY.PEEK[])")
         if status != "OK":
             logger.debug("UID FETCH 返回非OK: status=%s, uid=%s, folder=%s", status, uid, folder)
             raise ValueError(f"Message {uid} not found")
         # 查找包含邮件内容的 tuple 项
         raw_email = None
+        internal_date = ""
         for item in msg_data:
             if isinstance(item, tuple) and len(item) == 2:
+                response_text = item[0].decode("utf-8", errors="ignore") if item[0] else ""
+                internal_date = internal_date or self._parse_internal_date(response_text)
                 raw_email = item[1]
                 break
         if not raw_email:
@@ -342,13 +352,64 @@ class BaseIMAPReceiver(MailReceiver):
             subject=subject,
             from_addr=from_addr,
             to_addr=to_addr,
-            date=self._parse_date(date_str),
+            date=self._parse_date(date_str, fallback=internal_date),
             body_text=body_text,
             body_html=body_html,
             folder=folder,
             attachments=attachments,
             has_attachments=len(attachments) > 0,
         )
+
+    async def search_messages(self, folder: str, keyword: str, page: int = 1, page_size: int = 20) -> MessageList:
+        if not self._conn:
+            raise ConnectionError("Not connected")
+        return await asyncio.to_thread(self._search_messages_sync, folder, keyword, page, page_size)
+
+    def _search_messages_sync(self, folder: str, keyword: str, page: int, page_size: int) -> MessageList:
+        folder = self._normalize_folder(folder)
+        status, _ = self._conn.select(self._quote_mailbox(folder), readonly=True)
+        if status != "OK":
+            return MessageList(messages=[], total=0, unread_total=0, page=page, page_size=page_size)
+
+        trimmed = (keyword or "").strip()
+        if not trimmed:
+            return self._fetch_messages_sync(folder, page, page_size)
+
+        search_terms = ['OR', 'OR', 'SUBJECT', f'"{trimmed}"', 'FROM', f'"{trimmed}"', 'TEXT', f'"{trimmed}"']
+        status, data = self._conn.uid('SEARCH', 'CHARSET', 'UTF-8', *search_terms)
+        if status != 'OK':
+            return MessageList(messages=[], total=0, unread_total=0, page=page, page_size=page_size)
+
+        matched_uids = [uid for uid in data[0].split() if uid] if data and data[0] else []
+        total = len(matched_uids)
+        if total == 0:
+            return MessageList(messages=[], total=0, unread_total=0, page=page, page_size=page_size)
+
+        try:
+            s, u_data = self._conn.search(None, "UNSEEN")
+            unseen_uids = set(u_data[0].split()) if s == "OK" and u_data and u_data[0] else set()
+            unread_total = sum(1 for uid in matched_uids if uid in unseen_uids)
+        except Exception:
+            unread_total = 0
+
+        start = max(0, total - page * page_size)
+        end = max(0, total - (page - 1) * page_size)
+        page_uids = matched_uids[start:end]
+        page_uids.reverse()
+        if not page_uids:
+            return MessageList(messages=[], total=total, unread_total=unread_total, page=page, page_size=page_size)
+
+        uid_set = b",".join(page_uids)
+        status, msg_data = self._conn.uid(
+            'FETCH', uid_set,
+            '(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])'
+        )
+        if status != 'OK':
+            return MessageList(messages=[], total=total, unread_total=unread_total, page=page, page_size=page_size)
+
+        messages = self._parse_batch_fetch_response(msg_data, folder)
+        messages = self._sort_messages(messages)
+        return MessageList(messages=messages, total=total, unread_total=unread_total, page=page, page_size=page_size)
 
     # ---- 附件 ----
 
@@ -472,7 +533,7 @@ class BaseIMAPReceiver(MailReceiver):
         # UID 按降序排列（最新的在前），用逗号拼接成 UID 集合
         uid_set = ",".join(str(u) for u in sorted(uids, reverse=True))
         status, msg_data = self._conn.uid('FETCH', uid_set,
-            '(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])')
+            '(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])')
         if status != 'OK':
             return []
         messages = self._parse_batch_fetch_response(msg_data, folder)

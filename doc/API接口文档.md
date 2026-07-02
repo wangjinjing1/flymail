@@ -16,15 +16,13 @@
 - WebSocket：`/mail/ws`
 - Swagger：`/mail/docs`
 
-下文示例均以未配置 `FLYMAIL_BASE_PATH` 为例。
-
 ## 认证方式
 
-系统使用基于 Cookie 的会话认证。
+系统使用基于 Cookie 的会话认证：
 
 - 登录成功后，后端会写入 HTTP Only Cookie
 - 后续请求由浏览器自动携带 Cookie
-- 未登录时访问受保护接口会返回 401
+- 未登录时访问受保护接口会返回 `401`
 
 ## 认证接口
 
@@ -38,21 +36,6 @@
 {
   "username": "admin",
   "password": "change_me_please"
-}
-```
-
-响应示例：
-
-```json
-{
-  "success": true,
-  "user": {
-    "id": "uuid",
-    "uid": "uuid",
-    "username": "admin",
-    "role": "admin",
-    "status": "active"
-  }
 }
 ```
 
@@ -89,16 +72,6 @@
 
 创建用户。
 
-请求体示例：
-
-```json
-{
-  "username": "alice",
-  "password": "password123",
-  "role": "user"
-}
-```
-
 ### `POST /api/admin/users/{user_id}/reset-password`
 
 重置指定用户密码。
@@ -113,16 +86,6 @@
 
 健康检查。
 
-响应示例：
-
-```json
-{
-  "status": "ok",
-  "app": "flymail",
-  "version": "1.0.3"
-}
-```
-
 ### `GET /api/user`
 
 兼容接口，返回当前登录用户的基础信息。
@@ -134,6 +97,8 @@
 ### `GET /api/accounts`
 
 获取当前用户的邮箱账号列表。
+
+账号对象包含 `poll_interval_seconds`，表示新邮件后台轮询间隔，单位秒，默认 `10`。所有在线账号都会按该间隔做后台兜底拉新；支持 IDLE 的账号仍优先使用实时通知。
 
 ### `POST /api/accounts/auth-url`
 
@@ -166,7 +131,7 @@
 
 添加网易邮箱。
 
-上述三个接口请求体结构一致：
+上面三个接口请求体结构一致：
 
 ```json
 {
@@ -180,9 +145,17 @@
 
 更新邮箱备注、分组、隐藏状态等信息。
 
+可更新字段：
+- `remark`
+- `group_name`
+- `hide_email`
+- `poll_interval_seconds`：新邮件后台轮询间隔，单位秒，范围 `5` 到 `3600`。所有在线账号都会按该间隔做后台兜底拉新。
+
 ### `DELETE /api/accounts/{account_id}`
 
-删除邮箱账号。
+移除邮箱账号。
+
+说明：移除账号不会删除已经缓存下来的历史邮件正文和本地附件文件。
 
 ### `POST /api/accounts/{account_id}/test`
 
@@ -218,21 +191,9 @@
 
 ## 邮件接口
 
-### `GET /api/messages/unified`
-
-获取聚合收件箱邮件列表。
-
-常用查询参数：
-
-- `page`
-- `page_size`
-- `account_filter`
-- `read_filter`
-- `attachment_filter`
-
 ### `GET /api/messages`
 
-获取单账号文件夹邮件列表。
+获取单账号单文件夹邮件列表。
 
 常用查询参数：
 
@@ -243,9 +204,29 @@
 - `read_filter`
 - `attachment_filter`
 
+说明：
+- 在线账号的普通列表请求会优先读取本地缓存；当前页缓存不足、远端统计未知，或本地缓存数量少于 IMAP 已知总数时，才会从 IMAP 拉取当前页摘要并同步写入本地缓存。
+- 返回的 `total`、`unread_total` 和 `filter_counts.all/unread/read` 以 IMAP 当前状态为准；`filter_counts.read = all - unread`。
+- `filter_counts.attachments` 来自本地缓存，表示已缓存摘要中带附件的数量。
+- `read_filter=read|unread` 的列表数据仍基于本地缓存筛选；本地筛选结果不足或远端统计未知时，接口会刷新当前远端页和远端计数，用于校正当前页已读状态和顶部计数。
+
+### `GET /api/messages/search`
+
+按关键字搜索邮件。在线账号会先刷新当前账号、当前文件夹的最近一页缓存，再查询本地缓存。
+
+常用查询参数：
+
+- `account_id`
+- `folder`
+- `keyword`
+- `page`
+- `page_size`
+- `read_filter`
+- `attachment_filter`
+
 ### `GET /api/messages/refresh`
 
-强制从远端刷新当前文件夹邮件列表。
+从远端刷新当前账号、当前文件夹的最近一页邮件，并把缺失或变更的摘要写入本地缓存。
 
 ### `GET /api/messages/{message_id}`
 
@@ -255,6 +236,8 @@
 
 - `account_id`
 - `folder`
+
+说明：正文优先读数据库缓存；附件优先读本地文件。离线账号下，如果本地没有对应数据，会直接返回未找到。
 
 ### `GET /api/messages/{message_id}/attachments/{part_number}`
 
@@ -341,14 +324,6 @@
 
 更新应用设置。
 
-### `GET /api/settings/unified`
-
-获取聚合收件箱账号选择设置。
-
-### `PUT /api/settings/unified`
-
-保存聚合收件箱账号选择设置。
-
 ### `GET /api/settings/oauth-diagnostic`
 
 查看 OAuth 配置诊断信息。
@@ -387,13 +362,21 @@
 
 获取当前用户全部邮箱的历史同步任务状态。
 
+响应中的 `folder_progress` 按文件夹返回：
+- `cached_count`：本地已缓存邮件数。
+- `total_count`：最近一次从 IMAP 统计到的远端总数。
+- `unread_count`：最近一次从 IMAP 统计到的远端未读数。
+- `is_synced`：`total_count > 0 && cached_count >= total_count`。
+
+前端历史同步页的“已同步邮件”汇总使用 `sum(folder_progress.cached_count) / sum(folder_progress.total_count)`，与各文件夹子标签保持同一口径。
+
 ### `GET /api/history-sync/jobs/{account_id}`
 
 获取指定邮箱的同步任务状态。
 
 ### `POST /api/history-sync/jobs/{account_id}/start`
 
-开始历史同步。
+重置并重新开始历史同步。
 
 ### `POST /api/history-sync/jobs/{account_id}/pause`
 
@@ -402,6 +385,10 @@
 ### `POST /api/history-sync/jobs/{account_id}/resume`
 
 从上次断点继续同步。
+
+### `POST /api/history-sync/jobs/{account_id}/retry`
+
+从当前失败位置继续重试。
 
 ## WebSocket
 
@@ -417,15 +404,11 @@
 /mail/ws
 ```
 
-连接要求：
-
-- 浏览器处于已登录状态
-- 会话 Cookie 会自动携带
-
 常见消息类型：
 
 - `ping`
 - `new_mail`
+- `cache_updated`：缓存刷新完成。消息包含 `account_id`、`folder`，并尽量携带 `folder_counts`；前端用它刷新侧边栏、当前列表统计和历史同步页进度。
 - `connection_status`
 - `sync_progress`
 - `message_state_changed`
@@ -439,5 +422,3 @@
   "error": "错误信息"
 }
 ```
-
-部分接口会返回更具体的业务字段，建议以前端当前实现和 Swagger 页面为准。

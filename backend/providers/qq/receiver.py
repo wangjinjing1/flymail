@@ -129,7 +129,7 @@ class QQReceiver(BaseIMAPReceiver):
             ("已发送", ["Sent Messages", "Sent"]),
             ("草稿箱", ["Drafts"]),
             ("垃圾邮件", ["Junk", "Spam"]),
-            ("已删除", ["Deleted Messages", "Trash"]),
+            ("已删除", ["Deleted Messages", "Trash", "已删除"]),
         ]
 
         # 先收集所有文件夹
@@ -156,9 +156,14 @@ class QQReceiver(BaseIMAPReceiver):
         # 按核心文件夹顺序排列，匹配可能的多种路径名
         for display_name, possible_paths in core_folder_map:
             matched_path = None
-            for p in possible_paths:
-                if p in all_folders:
-                    matched_path = p
+            for folder_name in all_folders:
+                decoded_name = decode_modified_utf7(folder_name)
+                if (
+                    folder_name in possible_paths
+                    or decoded_name in possible_paths
+                    or decoded_name == display_name
+                ):
+                    matched_path = folder_name
                     break
             if matched_path:
                 result.append(Folder(
@@ -249,7 +254,7 @@ class QQReceiver(BaseIMAPReceiver):
         uid_set = b",".join(page_uids)
         status, msg_data = self._conn.uid(
             'FETCH', uid_set,
-            '(FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE)])'
+            '(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE)])'
         )
         if status != 'OK':
             return MessageList(messages=[], total=total, unread_total=unread_total, page=page, page_size=page_size)

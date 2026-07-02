@@ -66,9 +66,9 @@
             </div>
             <!-- 操作按钮 -->
             <div class="card-actions">
-              <button v-if="mailStore.reauthAccountIds.has(account.id)" class="btn-reauth-card" @click.stop="reauthorizeAccount(account)" title="重新授权">
+              <button v-if="mailStore.reauthAccountIds.has(account.id) || account.status === 'offline'" class="btn-reauth-card" @click.stop="reconnectAccount(account)" :title="account.status === 'offline' ? '重新连接' : '重新授权'">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                重新授权
+                {{ account.status === 'offline' ? '重新连接' : '重新授权' }}
               </button>
               <button class="edit-btn" @click.stop="openEditDialog(account)" title="编辑">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -203,6 +203,11 @@
               <button v-for="g in existingGroups" :key="g" class="group-tag" :class="{ active: editForm.group_name === g }" @click="editForm.group_name = g">{{ g }}</button>
             </div>
           </div>
+          <div class="form-field">
+            <label class="field-label">新邮件轮询间隔（秒）</label>
+            <input v-model.number="editForm.poll_interval_seconds" class="input" type="number" min="5" max="3600" step="1" />
+            <span class="field-hint">所有在线账号都会按该间隔兜底拉新；支持 IDLE 的账号仍优先使用实时通知。</span>
+          </div>
           <div class="form-field toggle-field">
             <span class="toggle-label">隐藏邮箱地址</span>
             <button class="toggle-switch" :class="{ active: editForm.hide_email }" @click="editForm.hide_email = !editForm.hide_email" type="button">
@@ -212,6 +217,9 @@
         </div>
         <div class="dialog-actions">
           <button class="btn btn-secondary" @click="showEditDialog = false">取消</button>
+          <button v-if="editingAccount?.status === 'offline' || mailStore.reauthAccountIds.has(editingAccount?.id)" class="btn btn-secondary" @click="reconnectAccount(editingAccount!)">
+            {{ editingAccount?.status === 'offline' ? '重新连接' : '重新授权' }}
+          </button>
           <button class="btn btn-danger-text" @click="confirmDelete(editingAccount!)">删除账号</button>
           <button class="btn btn-primary" @click="saveEdit">保存</button>
         </div>
@@ -221,7 +229,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import api from '../utils/api';
 import { useUIStore } from '../stores/ui';
 import { useMailStore } from '../stores/mail';
@@ -236,6 +244,7 @@ function handleWsMessage(data: any) {
   if (data.type === 'connection_status') {
     const account = mailStore.accounts.find(a => a.id === data.account_id);
     if (account) {
+      if (account.status === 'offline') return;
       if (data.status === 'reauth_needed') {
         account.status = 'reauth_needed';
         mailStore.reauthAccountIds.add(data.account_id);
@@ -265,7 +274,7 @@ const neteaseForm = ref({ email: '', auth_code: '' });
 const icloudForm = ref({ email: '', auth_code: '' });
 const MICROSOFT_ICON_SVG = '<svg width="24" height="24" viewBox="0 0 1024 1024"><path d="M0.10238 51.189762h460.503099v460.503099H0.10238V51.189762z" fill="#F45325"/><path d="M512.204759 51.189762H972.707858v460.503099h-460.503099V51.189762z" fill="#81BD06"/><path d="M0.10238 563.292142h460.503099v460.656668H0.10238v-460.656668z" fill="#04A6EF"/><path d="M512.204759 563.292142H972.707858v460.656668h-460.503099v-460.656668z" fill="#FFBA07"/></svg>';
 const editingAccount = ref<any>(null);
-const editForm = ref({ remark: '', group_name: '', hide_email: false });
+const editForm = ref({ remark: '', group_name: '', hide_email: false, poll_interval_seconds: 10 });
 
 const providers = [
   {
@@ -331,24 +340,63 @@ const groupedAccounts = computed(() => {
   }
 });
 
+async function handleOAuthSuccess() {
+  sessionStorage.setItem('flymail_oauth_just_added', '1');
+  showAddDialog.value = false;
+  showEditDialog.value = false;
+  fetchHistory.value = false;
+  await mailStore.loadAccounts();
+  await mailStore.loadFolders();
+  mailStore.accounts.forEach((account: any) => {
+    if (account.status !== 'offline') account.status = 'connected';
+  });
+}
+
+function handleOAuthMessage(event: MessageEvent) {
+  const data = event.data || {};
+  if (data.type === 'flymail_oauth_success') {
+    handleOAuthSuccess().catch((error) => {
+      console.error('refresh accounts after OAuth failed:', error);
+      ui.error('刷新账号列表失败');
+    });
+    return;
+  }
+  if (data.type === 'flymail_oauth_error') {
+    ui.error(data.error || '邮箱授权失败');
+  }
+}
+
 onMounted(async () => {
+  window.addEventListener('message', handleOAuthMessage);
   connectWs();
   await mailStore.loadAccounts();
   loading.value = false;
   // 立即将所有账号状态设为 checking，避免 sessionStorage 缓存的旧状态闪烁
-  mailStore.accounts.forEach((account: any) => { account.status = 'checking'; });
+  mailStore.accounts.forEach((account: any) => {
+    if (account.status !== 'offline') account.status = 'checking';
+  });
   const oauthJustAdded = sessionStorage.getItem('flymail_oauth_just_added') === '1';
   if (oauthJustAdded) {
     // OAuth 成功后后端还在启动同步/刷新令牌，立即测试容易把临时 token 状态误报成 invalid token。
     sessionStorage.removeItem('flymail_oauth_just_added');
-    mailStore.accounts.forEach((account: any) => { account.status = 'connected'; });
+    mailStore.accounts.forEach((account: any) => {
+      if (account.status !== 'offline') account.status = 'connected';
+    });
     return;
   }
   checkAllAccountsStatus();
 });
 
+onBeforeUnmount(() => {
+  window.removeEventListener('message', handleOAuthMessage);
+});
+
 async function checkAllAccountsStatus() {
   for (const account of mailStore.accounts) {
+    if (account.status === 'offline') {
+      mailStore.reauthAccountIds.delete(account.id);
+      continue;
+    }
     // 已知需要重新授权的账号跳过测试
     if (mailStore.reauthAccountIds.has(account.id)) {
       account.status = 'reauth_needed';
@@ -358,15 +406,20 @@ async function checkAllAccountsStatus() {
   }
   await Promise.allSettled(
     mailStore.accounts.map(async (account) => {
+      if (account.status === 'offline') return;
       if (account.status === 'reauth_needed') return;
       try {
-        const data = await api.post(`/accounts/${account.id}/test`) as any;
+        const data = await api.post(`/accounts/${account.id}/test`, {}, { timeout: 15000 }) as any;
         account.status = data.success ? 'connected' : 'error';
         if (!data.success) {
           console.warn('账号连接检测失败:', account.email, data.error || '未知错误');
         }
       } catch {
         account.status = 'error';
+      } finally {
+        if (account.status === 'checking') {
+          account.status = 'error';
+        }
       }
     })
   );
@@ -495,19 +548,44 @@ async function addICloudAccount() {
   }
 }
 
+function openReconnectDialog(account: any) {
+  fetchHistory.value = false;
+  if (account.provider === 'qq') {
+    qqForm.value = { email: account.email || '', auth_code: '' };
+    showQQDialog.value = true;
+    return;
+  }
+  if (account.provider === 'netease') {
+    neteaseForm.value = { email: account.email || '', auth_code: '' };
+    showNeteaseDialog.value = true;
+    return;
+  }
+  if (account.provider === 'icloud') {
+    icloudForm.value = { email: account.email || '', auth_code: '' };
+    showICloudDialog.value = true;
+  }
+}
+
 function openEditDialog(account: any) {
   editingAccount.value = account;
-  editForm.value = { remark: account.remark, group_name: account.group_name, hide_email: account.hide_email };
+  editForm.value = {
+    remark: account.remark,
+    group_name: account.group_name,
+    hide_email: account.hide_email,
+    poll_interval_seconds: account.poll_interval_seconds || 10,
+  };
   showEditDialog.value = true;
 }
 
 async function saveEdit() {
   if (!editingAccount.value) return;
   try {
+    editForm.value.poll_interval_seconds = Math.min(3600, Math.max(5, Number(editForm.value.poll_interval_seconds) || 10));
     await api.put(`/accounts/${editingAccount.value.id}`, editForm.value);
     editingAccount.value.remark = editForm.value.remark;
     editingAccount.value.group_name = editForm.value.group_name;
     editingAccount.value.hide_email = editForm.value.hide_email;
+    editingAccount.value.poll_interval_seconds = editForm.value.poll_interval_seconds;
     showEditDialog.value = false;
     ui.success('保存成功');
   } catch {
@@ -517,9 +595,9 @@ async function saveEdit() {
 
 async function confirmDelete(account: any) {
   const ok = await ui.showConfirm({
-    title: '删除账号',
-    message: `确定要删除账号 ${account.email} 吗？此操作不可撤销。`,
-    confirmText: '删除',
+    title: '移除账号',
+    message: `确定要移除账号 ${account.email} 吗？远端登录会失效，但本地已缓存的邮件和附件会保留，可继续离线查看。`,
+    confirmText: '移除',
     danger: true,
   });
   if (ok) {
@@ -530,9 +608,9 @@ async function confirmDelete(account: any) {
       await mailStore.loadAccounts();
       await mailStore.loadFolders();
       showEditDialog.value = false;
-      ui.success('账号已删除');
-    } catch {
-      ui.error('删除失败');
+      ui.success('账号已转为离线可查看');
+    } catch (e: any) {
+      ui.error(e?.message || e?.error || e?.response?.data?.error || '删除失败');
     }
   }
 }
@@ -542,6 +620,7 @@ function statusText(status: string) {
   const map: Record<string, string> = {
     connected: '已连接',
     disconnected: '未连接',
+    offline: '离线可查看',
     error: '连接异常',
     checking: '检测中',
     reauth_needed: '需要重新授权',
@@ -550,11 +629,25 @@ function statusText(status: string) {
 }
 
 /** 重新授权指定账号（复用添加账号的 OAuth 流程） */
-async function reauthorizeAccount(account: any) {
+async function reconnectAccount(account: any) {
+  if (!account) return;
+  if (account.provider === 'qq' || account.provider === 'netease' || account.provider === 'icloud') {
+    openReconnectDialog(account);
+    return;
+  }
   try {
+    const settingsData = await api.get('/settings') as any;
+    const settings = settingsData.settings || settingsData || {};
+    const redirectUri = account.provider === 'outlook'
+      ? (settings.outlook_redirect_uri || '')
+      : (settings.gmail_redirect_uri || '');
+    if (!redirectUri) {
+      ui.error(account.provider === 'outlook' ? '请先在设置页面配置 Microsoft 重定向 URI' : '请先在设置页面配置 Gmail 重定向 URI');
+      return;
+    }
     const data = await api.post('/accounts/auth-url', {
       provider: account.provider,
-      user_uid: mailStore.user?.uid || '',
+      redirect_uri: redirectUri,
     }) as any;
     if (data.auth_url) {
       // 新标签页打开 OAuth 授权页面（Google 等不支持在当前页跳转）
@@ -573,7 +666,10 @@ async function reauthorizeAccount(account: any) {
 
 <style scoped>
 .account-page {
+  flex: 1;
+  width: 100%;
   height: 100%;
+  min-width: 0;
   overflow-y: auto;
   padding: var(--space-6);
   background: var(--bg-secondary);
@@ -854,6 +950,8 @@ async function reauthorizeAccount(account: any) {
 .account-status.connected .status-dot { background: #4CAF50; }
 .account-status.disconnected { background: var(--bg-tertiary); color: var(--text-tertiary); }
 .account-status.disconnected .status-dot { background: var(--text-tertiary); }
+.account-status.offline { background: #EEF2FF; color: #4338CA; }
+.account-status.offline .status-dot { background: #6366F1; }
 .account-status.error { background: #FFEBEE; color: #C62828; }
 .account-status.error .status-dot { background: #EF5350; }
 .account-status.checking { background: #E3F2FD; color: #1565C0; }

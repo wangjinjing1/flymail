@@ -31,10 +31,8 @@ class SettingsUpdateResponse(BaseModel):
 
 
 class SettingsUpdateRequest(BaseModel):
-    """更新应用设置请求模型，所有字段可选。
+    """更新应用设置请求模型，所有字段可选。"""
 
-    client_secret 为空或包含星号（脱敏值）时不会覆盖已有密钥。
-    """
     gmail_client_id: Optional[str] = Field(default=None, max_length=500, description="Gmail OAuth 客户端ID")
     gmail_client_secret: Optional[str] = Field(default=None, max_length=500, description="Gmail OAuth 客户端密钥")
     gmail_redirect_uri: Optional[str] = Field(default=None, max_length=500, description="Gmail OAuth 回调地址")
@@ -44,7 +42,7 @@ class SettingsUpdateRequest(BaseModel):
 
 
 class AuthUrlResponse(BaseModel):
-    auth_url: str = Field(description="第三方授权页面URL，前端跳转到此地址")
+    auth_url: str = Field(description="第三方授权页面 URL")
     provider: str = Field(description="邮箱平台类型")
 
 
@@ -66,6 +64,7 @@ class AccountInfo(BaseModel):
     remark: str = Field(description="备注名")
     group_name: str = Field(description="分组名称")
     hide_email: bool = Field(description="是否隐藏邮箱地址")
+    poll_interval_seconds: int = Field(default=10, description="新邮件后台轮询间隔（秒）")
     created_at: float = Field(description="创建时间戳")
 
 
@@ -88,6 +87,7 @@ class AccountUpdateRequest(BaseModel):
     remark: str = Field(default="", description="备注名")
     group_name: str = Field(default="", description="分组名称")
     hide_email: bool = Field(default=False, description="是否隐藏邮箱地址")
+    poll_interval_seconds: int = Field(default=10, ge=5, le=3600, description="新邮件后台轮询间隔（秒）")
 
 
 class StatusResponse(BaseModel):
@@ -104,7 +104,7 @@ class MessageResponse(BaseModel):
 
 
 class OAuthDiagnosticResponse(BaseModel):
-    status: str = Field(description="诊断状态：正常 / 有问题")
+    status: str = Field(description="诊断状态")
     issues: List[str] = Field(description="发现的问题列表")
     runtime: Dict[str, str] = Field(description="运行时 OAuth 配置（已脱敏）")
     stored: Dict[str, str] = Field(description="持久化 OAuth 配置（已脱敏）")
@@ -142,8 +142,8 @@ class AttachmentItem(BaseModel):
     filename: str = Field(default="", description="附件文件名")
     content_type: str = Field(default="", description="MIME 类型")
     size: int = Field(default=0, description="文件大小（字节）")
-    part_number: int = Field(default=0, description="IMAP part 编号，用于下载附件")
-    content_id: str = Field(default="", description="Content-ID，内嵌图片标识")
+    part_number: int = Field(default=0, description="IMAP part 编号")
+    content_id: str = Field(default="", description="Content-ID")
     is_inline: bool = Field(default=False, description="是否为内嵌附件")
 
 
@@ -161,9 +161,7 @@ class MessageItem(BaseModel):
     body_html: str = Field(default="", description="HTML 正文")
     attachments: List[AttachmentItem] = Field(default=[], description="附件列表")
     has_attachments: bool = Field(default=False, description="是否包含附件")
-    account_id: str = Field(default="", description="账号ID，聚合收件箱返回")
-    account_email: str = Field(default="", description="账号邮箱，聚合收件箱返回")
-    account_provider: str = Field(default="", description="邮箱平台，聚合收件箱返回")
+    account_id: str = Field(default="", description="账号ID")
 
 
 class MessageListResponse(BaseModel):
@@ -175,12 +173,11 @@ class MessageListResponse(BaseModel):
     account_id: str = Field(default="", description="账号ID")
     error: str = Field(default="", description="错误信息")
     reconnecting: bool = Field(default=False, description="邮箱连接异常时是否正在重连")
-    no_accounts: bool = Field(default=False, description="聚合收件箱是否未选择任何账号")
-    filter_counts: dict = Field(default={}, description="各筛选条件的计数: {all, unread, read, attachments}")
+    filter_counts: dict = Field(default={}, description="筛选计数")
 
 
 class PrefetchMessagesRequest(BaseModel):
-    message_ids: List[str] = Field(default=[], max_length=50, description="需要预取正文的邮件ID列表，最多50封")
+    message_ids: List[str] = Field(default=[], max_length=50, description="需要预取正文的邮件ID列表")
     account_id: str = Field(default="", description="账号ID")
     folder: str = Field(default="INBOX", description="文件夹路径")
 
@@ -188,7 +185,7 @@ class PrefetchMessagesRequest(BaseModel):
 class PrefetchMessagesResponse(BaseModel):
     success: bool = Field(default=True, description="是否成功")
     queued: int = Field(default=0, description="已加入后台预取队列的邮件数量")
-    prefetched: int = Field(default=0, description="已预取数量；无任务时返回0")
+    prefetched: int = Field(default=0, description="已预取数量")
 
 
 class MarkReadRequest(BaseModel):
@@ -223,7 +220,7 @@ class SendMessageRequest(BaseModel):
     to: str = Field(description="收件人邮箱地址")
     subject: str = Field(description="邮件主题")
     content: str = Field(description="邮件正文")
-    html: bool = Field(default=False, description="是否为HTML格式")
+    html: bool = Field(default=False, description="是否为 HTML 格式")
 
 
 class SendMessageResponse(BaseModel):
@@ -232,31 +229,30 @@ class SendMessageResponse(BaseModel):
 
 
 class ComposeMessageRequest(BaseModel):
-    """写邮件请求模型，支持发送/草稿/定时发送"""
-
-    account_id: str = Field(default="", description="发件账号ID，空则使用第一个账号")
-    to: list[str] = Field(default=[], max_length=50, description="收件人列表，最多50人")
-    cc: list[str] = Field(default=[], max_length=50, description="抄送列表，最多50人")
-    bcc: list[str] = Field(default=[], max_length=50, description="密送列表，最多50人")
-    subject: str = Field(default="", max_length=500, description="邮件主题，最多500字符")
-    body_html: str = Field(default="", description="HTML格式正文")
-    attachments: list[str] = Field(default=[], max_length=20, description="附件文件路径列表，最多20个")
-    action: str = Field(default="send", description="操作类型: send=发送, draft=保存草稿, schedule=定时发送")
-    schedule_time: str | None = Field(default=None, description="ISO8601定时发送时间（action=schedule时必填）")
-    in_reply_to: str | None = Field(default=None, description="回复的邮件Message-ID")
-    forward_from: str | None = Field(default=None, description="转发的邮件Message-ID")
+    account_id: str = Field(default="", description="发件账号ID")
+    to: list[str] = Field(default=[], max_length=50, description="收件人列表")
+    cc: list[str] = Field(default=[], max_length=50, description="抄送列表")
+    bcc: list[str] = Field(default=[], max_length=50, description="密送列表")
+    subject: str = Field(default="", max_length=500, description="邮件主题")
+    body_html: str = Field(default="", description="HTML 格式正文")
+    attachments: list[str] = Field(default=[], max_length=20, description="附件文件路径列表")
+    action: str = Field(default="send", description="操作类型")
+    schedule_time: str | None = Field(default=None, description="ISO8601 定时发送时间")
+    in_reply_to: str | None = Field(default=None, description="回复的邮件 Message-ID")
+    forward_from: str | None = Field(default=None, description="转发的邮件 Message-ID")
 
 
 class ComposeMessageResponse(BaseModel):
     success: bool = Field(default=True, description="是否成功")
     message: str = Field(description="结果消息")
-    job_id: str = Field(default="", description="定时发送任务ID，仅 action=schedule 时返回")
+    job_id: str = Field(default="", description="定时发送任务ID")
+    sent_folder: str = Field(default="", description="已发送文件夹路径")
 
 
 class UploadAttachmentResponse(BaseModel):
     filename: str = Field(description="原始文件名")
     size: int = Field(description="文件大小（字节）")
-    path: str = Field(description="服务端临时附件路径，发送邮件时传入 attachments")
+    path: str = Field(description="服务端临时附件路径")
 
 
 class SignatureSettingsRequest(BaseModel):
@@ -266,21 +262,21 @@ class SignatureSettingsRequest(BaseModel):
 
 class SignatureSettingsResponse(BaseModel):
     signature_html: str = Field(default="", description="签名 HTML 内容")
-    signature_enabled: int = Field(default=0, description="是否启用签名，1=启用，0=关闭")
+    signature_enabled: int = Field(default=0, description="是否启用签名")
 
 
 class SignatureTemplateRequest(BaseModel):
     name: str = Field(default="", description="签名模板名称")
     content_html: str = Field(default="", description="签名 HTML 内容")
     is_default: bool = Field(default=False, description="是否默认签名")
-    account_id: str = Field(default="", description="关联账号ID，空表示全局模板")
+    account_id: str = Field(default="", description="关联账号ID")
 
 
 class SignatureTemplateUpdateRequest(BaseModel):
-    name: Optional[str] = Field(default=None, description="签名模板名称，不传则保持不变")
-    content_html: Optional[str] = Field(default=None, description="签名 HTML 内容，不传则保持不变")
-    is_default: Optional[bool] = Field(default=None, description="是否默认签名，不传则保持不变")
-    account_id: Optional[str] = Field(default=None, description="关联账号ID，不传则保持不变")
+    name: Optional[str] = Field(default=None, description="签名模板名称")
+    content_html: Optional[str] = Field(default=None, description="签名 HTML 内容")
+    is_default: Optional[bool] = Field(default=None, description="是否默认签名")
+    account_id: Optional[str] = Field(default=None, description="关联账号ID")
 
 
 class SignatureTemplateItem(BaseModel):
@@ -288,27 +284,11 @@ class SignatureTemplateItem(BaseModel):
     name: str = Field(description="签名模板名称")
     content_html: str = Field(default="", description="签名 HTML 内容")
     is_default: bool = Field(default=False, description="是否默认签名")
-    account_id: str = Field(default="", description="关联账号ID，空表示全局模板")
+    account_id: str = Field(default="", description="关联账号ID")
 
 
 class SignatureListResponse(BaseModel):
     signatures: List[SignatureTemplateItem] = Field(description="签名模板列表")
-
-
-class UnifiedSettingsRequest(BaseModel):
-    account_ids: List[str] = Field(default=[], max_length=100, description="参与聚合收件箱的账号ID列表，最多100个")
-
-
-class UnifiedSettingsAccount(BaseModel):
-    id: str = Field(description="账号ID")
-    email: str = Field(description="邮箱地址")
-    provider: str = Field(description="邮箱平台")
-    selected: bool = Field(description="是否已选入聚合收件箱")
-
-
-class UnifiedSettingsResponse(BaseModel):
-    account_ids: List[str] = Field(description="已选账号ID列表")
-    accounts: List[UnifiedSettingsAccount] = Field(description="可选择的账号列表")
 
 
 class ScheduledMessagesResponse(BaseModel):
@@ -322,8 +302,8 @@ class NotificationItem(BaseModel):
     email: str = Field(description="邮箱地址")
     folder: str = Field(description="文件夹")
     is_read: bool = Field(description="是否已读")
-    time: float = Field(description="通知时间（毫秒时间戳）")
-    type: str = Field(default="new_mail", description="通知类型：new_mail / schedule_success / schedule_failed")
+    time: float = Field(description="通知时间")
+    type: str = Field(default="new_mail", description="通知类型")
     message: str = Field(default="", description="通知描述文本")
 
 

@@ -173,6 +173,9 @@ class MailReceiver(ABC):
     async def fetch_messages(self, folder: str, page: int = 1, page_size: int = 20) -> MessageList:
         pass
 
+    async def search_messages(self, folder: str, keyword: str, page: int = 1, page_size: int = 20) -> MessageList:
+        return await self.fetch_messages(folder=folder, page=page, page_size=page_size)
+
     async def fetch_new_message_uids(self, folder: str, since_uid: int) -> List[int]:
         """获取大于指定UID的新邮件UID列表（用于增量同步）
 

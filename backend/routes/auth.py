@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse
 from errors import AppError
 from fastapi.middleware.cors import CORSMiddleware
 
-from db import create_account, get_accounts, update_account_credentials
+from db import activate_account, create_account, get_accounts, update_account_credentials
 from models import Account
 from providers.factory import ProviderFactory
 from services.history_sync import schedule_history_sync
@@ -239,7 +239,8 @@ def _build_oauth_result_html(params: dict) -> HTMLResponse:
     state = params.get("state", "")
     frontend_url = _extract_oauth_frontend_url_from_state(state) if state else ""
     try:
-        target_origin = str(urllib.parse.urlparse(frontend_url).origin) if frontend_url else ""
+        parsed_frontend = urllib.parse.urlparse(frontend_url) if frontend_url else None
+        target_origin = f"{parsed_frontend.scheme}://{parsed_frontend.netloc}" if parsed_frontend and parsed_frontend.scheme and parsed_frontend.netloc else ""
     except Exception:
         target_origin = ""
     # 若无法确定 origin（如 state 缺失），fallback 到空字符串（postMessage 会拒绝所有源）
@@ -305,7 +306,7 @@ def _build_oauth_result_html(params: dict) -> HTMLResponse:
     <h1>{title}</h1>
     <p>{message}</p>
     <button onclick="tryClose()">关闭此页</button>
-    <p class="hint">请回到飞牛 NAS 中已登录的飞邮应用查看账号状态。</p>
+    <p class="hint">请回到 FlyMail 页面查看账号状态。</p>
   </div>
   <script>
 function tryClose() {{
@@ -396,7 +397,10 @@ async def oauth_callback(
                 "expires_at": credentials.expires_at,
                 "extra": credentials.extra,
             })
-            await update_account_credentials(existing.id, new_creds)
+            if existing.status == "offline":
+                await activate_account(existing.id, new_creds, status="connected")
+            else:
+                await update_account_credentials(existing.id, new_creds)
             logger.info("重新授权成功，已更新凭据: email=%s, provider=%s", email, provider)
             # O9 修复：先停止旧的 IMAP 监听任务（用旧 token 的任务会持续认证失败），
             # 再启动新的监听任务

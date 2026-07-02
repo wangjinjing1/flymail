@@ -9,24 +9,27 @@ import ssl
 import time
 import uuid
 
+from data_paths import clear_account_storage
 from fastapi import APIRouter, Request, Body, Path as FastAPIPath
 
 from errors import AppError
 
 from db import (
+    activate_account,
     get_accounts,
     create_account,
-    delete_account,
-    update_account_info,
+    deactivate_account,
+    delete_cached_attachments_by_account,
     delete_cached_messages_by_account,
     delete_folder_stats_by_account,
-    get_db,
+    delete_history_sync_jobs_by_account,
+    update_account_info,
 )
 from deps import get_uid
 from models import Account
 from providers.base import Credentials
 from providers.factory import ProviderFactory
-from services.history_sync import schedule_history_sync
+from services.history_sync import schedule_history_sync, start_clear_cache
 from services.mail_cache import initial_sync
 from services.settings import async_load_settings, async_save_settings
 from services.sync import sync_service
@@ -69,6 +72,10 @@ _AUTH_CODE_SUFFIX_ERRORS = {
 # ==================== 内部辅助函数 ====================
 # 从 _helpers 复用共享辅助函数，避免与其他 routes 模块重复定义
 from routes._helpers import _find_account_or_error, _safe_disconnect
+
+
+def _clear_account_local_cache(account_id: str, account_email: str = "") -> None:
+    clear_account_storage(account_id, account_email)
 
 
 def _sync_gmail_config(settings: dict):
@@ -128,6 +135,33 @@ async def _add_auth_code_account(request: Request, provider: str, body: AuthCode
         receiver = ProviderFactory.get_receiver(provider)
         await receiver.connect(credentials)
         await _safe_disconnect(receiver)
+        creds_json = json.dumps({
+            "access_token": auth_code,
+            "refresh_token": "",
+            "expires_at": 0,
+            "extra": {"email": email_addr},
+        })
+        existing = next((item for item in await get_accounts(uid) if item.email == email_addr and item.provider == provider), None)
+        if existing:
+            await activate_account(existing.id, creds_json, status="connected")
+            create_background_task(sync_service.add_account(existing.id), name="reconnect_account_imap")
+            create_background_task(initial_sync(existing.id), name="reconnect_initial_sync")
+            if fetch_history:
+                create_background_task(schedule_history_sync(existing.id), name="schedule_history_sync")
+            return {
+                "success": True,
+                "account": {
+                    "id": existing.id,
+                    "email": existing.email,
+                    "provider": existing.provider,
+                    "status": "connected",
+                    "remark": existing.remark,
+                    "group_name": existing.group_name,
+                    "hide_email": existing.hide_email,
+                    "poll_interval_seconds": existing.poll_interval_seconds,
+                    "created_at": existing.created_at,
+                }
+            }
 
         account = Account(
             id=str(uuid.uuid4()),
@@ -163,6 +197,7 @@ async def _add_auth_code_account(request: Request, provider: str, body: AuthCode
                 "remark": "",
                 "group_name": "",
                 "hide_email": False,
+                "poll_interval_seconds": account.poll_interval_seconds,
                 "created_at": account.created_at,
             }
         }
@@ -207,6 +242,7 @@ async def list_accounts(request: Request):
             "remark": acc.remark,
             "group_name": acc.group_name,
             "hide_email": acc.hide_email,
+            "poll_interval_seconds": acc.poll_interval_seconds,
             "created_at": acc.created_at,
             "reauth_needed": acc.id in sync_service.reauth_account_ids,
         })
@@ -285,7 +321,10 @@ async def remove_account(
     account_id: str = FastAPIPath(description="账号唯一ID"),
     request: Request = None,
 ):
-    """删除邮箱账号，同时撤销第三方令牌并停止后台同步"""
+    """删除邮箱账号，同时撤销第三方令牌并停止后台同步。
+
+    账号会被标记为 offline，保留本地缓存邮件和历史附件，便于继续离线查看。
+    """
     uid = await get_uid(request)
 
     accounts = await get_accounts(uid)
@@ -314,37 +353,24 @@ async def remove_account(
         logger.debug("撤销 OAuth token 失败（不影响删除账号）: %s", e)
 
     await sync_service.remove_account(account_id)
-    # 删除账号的邮件缓存和关联数据
-    try:
-        await delete_cached_messages_by_account(account_id)
-        await delete_folder_stats_by_account(account_id)
-        # 单例数据库连接不能在业务代码中 close，只执行删除和提交即可。
-        db = await get_db()
-        await db.execute("DELETE FROM notifications WHERE account_id = ?", (account_id,))
-        await db.commit()
-    except Exception as e:
-        logger.debug("清理账号关联数据失败: %s", e)
     # 清理同步锁，防止内存泄漏
     from services.mail_cache import remove_sync_lock
     remove_sync_lock(account_id)
     # 修复 P4：清理 token 锁，防止内存泄漏
     from services.token import remove_token_lock
     remove_token_lock(account_id)
-    deleted = await delete_account(account_id, uid)
-    if deleted:
+    offline = await deactivate_account(account_id, uid, status="offline", clear_credentials=True)
+    if offline:
         return {"success": True}
-    raise AppError(500, "Failed to delete account")
+    raise AppError(500, "Failed to mark account offline")
 
 
-@router.post("/{account_id}/rebuild-sync", response_model=MessageResponse, summary="重建同步：清空缓存并重新拉取")
+@router.post("/{account_id}/rebuild-sync", response_model=MessageResponse, summary="重建同步")
 async def rebuild_sync(
-    account_id: str = FastAPIPath(description="账号唯一ID"),
+    account_id: str = FastAPIPath(description="账号ID"),
     request: Request = None,
 ):
-    """清空当前账号的所有邮件缓存和文件夹统计，然后触发全量重新同步
-
-    适用场景：缓存数据不一致、邮件列表显示异常时，手动触发重建。
-    """
+    """清空账号缓存并在后台重新同步。"""
     uid = await get_uid(request)
     accounts = await get_accounts(uid)
     account = next((a for a in accounts if a.id == account_id), None)
@@ -352,24 +378,18 @@ async def rebuild_sync(
         raise AppError(404, "Account not found")
 
     try:
-        msg_count = await delete_cached_messages_by_account(account_id)
-        await delete_folder_stats_by_account(account_id)
-        logger.info("重建同步: 已清空账号 %s 的缓存（%d 条邮件）", account.email, msg_count)
-
-        # 2. 后台触发全量重新同步，完成后通过 WebSocket 通知前端刷新
         async def _rebuild_and_notify():
             try:
                 await initial_sync(account_id, force_full=True)
-                # 同步完成，通知前端刷新列表和计数
                 msg = json.dumps({
                     "type": "rebuild_done",
                     "account_id": account_id,
-                    "message": f"重建同步完成，共同步邮件",
+                    "message": "同步完成",
                 })
                 await sync_service._broadcast(msg, uid)
-                logger.info("重建同步完成: 账号 %s，已通知前端", account.email)
+                logger.info("rebuild sync finished: %s", account.email)
             except Exception as e:
-                logger.error("重建同步后台任务失败: %s", e)
+                logger.error("rebuild sync background failed: %s", e)
                 msg = json.dumps({
                     "type": "rebuild_done",
                     "account_id": account_id,
@@ -379,10 +399,27 @@ async def rebuild_sync(
 
         create_background_task(_rebuild_and_notify(), name="rebuild_and_notify")
 
-        return {"success": True, "message": f"已清空 {msg_count} 条缓存，正在后台重新同步"}
+        return {"success": True, "message": "已开始重建同步，请稍后查看进度"}
     except Exception as e:
-        logger.error("重建同步失败: %s", e)
+        logger.error("rebuild sync failed: %s", e)
         raise AppError(500, str(e))
+
+
+@router.post("/{account_id}/clear-cache", response_model=MessageResponse, summary="清空账号缓存")
+async def clear_cache(
+    account_id: str = FastAPIPath(description="账号ID"),
+    request: Request = None,
+):
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    account = next((a for a in accounts if a.id == account_id), None)
+    if not account:
+        raise AppError(404, "Account not found")
+
+    started = await start_clear_cache(account_id)
+    if not started:
+        raise AppError(409, "已有清空缓存任务正在执行")
+    return {"success": True, "message": "已开始清空缓存"}
 
 
 @router.post("/{account_id}/test", response_model=AccountTestResponse, summary="测试账号连接")
@@ -450,7 +487,15 @@ async def update_account(
 ):
     """更新账号的备注名、分组和邮箱隐藏设置"""
     uid = await get_uid(request)
-    updated = await update_account_info(account_id, uid, body.remark, body.group_name, body.hide_email)
+    updated = await update_account_info(
+        account_id,
+        uid,
+        body.remark,
+        body.group_name,
+        body.hide_email,
+        body.poll_interval_seconds,
+    )
     if updated:
+        create_background_task(sync_service.add_account(account_id), name="restart_account_imap")
         return {"success": True, "message": "账号信息已更新"}
     raise AppError(404, "Account not found")

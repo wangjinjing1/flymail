@@ -19,6 +19,7 @@ from providers.factory import ProviderFactory
 from services.token import ensure_token as _ensure_gmail_token
 from services.sync import sync_service
 from services.mail_cache import sync_folder_to_cache
+from services.outgoing_mail import ensure_sent_message_cached, find_special_folder
 from utils.logger import get_logger
 from schemas import (
     ComposeMessageRequest,
@@ -33,11 +34,6 @@ from routes._helpers import (
     _find_account_or_error,
     _safe_disconnect,
 )
-# _find_special_folder 依赖 IMAP fetch_folders，属于邮件操作专用工具，保留在 messages.py
-from routes.messages import (
-    _find_special_folder,
-)
-
 # ==================== 日志 ====================
 
 logger = get_logger("routes.compose")
@@ -45,6 +41,8 @@ logger = get_logger("routes.compose")
 # ==================== 路由 ====================
 
 router = APIRouter(tags=["写信"])
+
+
 
 # ==================== 定时发送接口 ====================
 
@@ -145,7 +143,7 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 if ok:
                     # 草稿保存成功后，主动同步草稿箱缓存
                     try:
-                        drafts_folder = await _find_special_folder(account, "drafts")
+                        drafts_folder = await find_special_folder(account, "drafts")
                         if drafts_folder:
                             await sync_folder_to_cache(account, drafts_folder)
                             await sync_service.refresh_clients(account.id, drafts_folder, user_uid=user_uid)
@@ -198,6 +196,7 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 to=body.to,
                 subject=body.subject,
                 body_html=body.body_html,
+                body_text="",
                 cc=body.cc or None,
                 bcc=body.bcc or None,
                 attachments=body.attachments or None,
@@ -210,15 +209,18 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 logger.debug("断开发送连接失败: %s", e)
 
         if result.success:
-            # 发送成功后，主动同步已发送文件夹缓存，确保前端能看到刚发的邮件
-            try:
-                sent_folder = await _find_special_folder(account, "sent")
-                if sent_folder:
-                    await sync_folder_to_cache(account, sent_folder)
-                    await sync_service.refresh_clients(account.id, sent_folder, user_uid=user_uid)
-            except Exception as sync_err:
-                logger.warning("发送后同步已发送文件夹失败: %s", sync_err)
-            return {"success": True, "message": "邮件发送成功"}
+            sent_folder = await ensure_sent_message_cached(
+                account=account,
+                user_uid=user_uid,
+                to=body.to,
+                cc=body.cc or [],
+                bcc=body.bcc or [],
+                subject=body.subject,
+                body_html=body.body_html,
+                attachments=body.attachments or [],
+                in_reply_to=body.in_reply_to,
+            )
+            return {"success": True, "message": "发送成功", "sent_folder": sent_folder or ""}
         else:
             raise AppError(500, result.error)
     except Exception as e:

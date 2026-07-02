@@ -10,6 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from data_paths import CONFIG_DIR, ensure_data_dirs
+from services.outgoing_mail import ensure_sent_message_cached
 
 logger = logging.getLogger("flymail")
 
@@ -98,7 +99,17 @@ async def _send_scheduled_email(
                 user_uid, account_id, account.provider, account.email, subject,
                 success=True
             )
-            await _sync_sent_folder_after_schedule(account)
+            await ensure_sent_message_cached(
+                account=account,
+                user_uid=user_uid,
+                to=to or [],
+                cc=cc or [],
+                bcc=bcc or [],
+                subject=subject or "",
+                body_html=body_html or "",
+                attachments=attachment_paths or [],
+                in_reply_to=in_reply_to,
+            )
         finally:
             await sender.disconnect()
     except Exception as e:
@@ -129,44 +140,6 @@ async def _notify_schedule_result(
         )
     except Exception as e:
         logger.error("定时发送通知推送失败: %s", e)
-
-
-async def _sync_sent_folder_after_schedule(account):
-    """定时发送成功后，同步已发送文件夹缓存"""
-    try:
-        from services.mail_cache import sync_folder_to_cache
-        from services.sync import sync_service
-        from providers.factory import ProviderFactory
-        from services.token import ensure_token
-
-        # 查找已发送文件夹路径
-        credentials = await ensure_token(account)
-        receiver = ProviderFactory.get_receiver(account.provider)
-        await receiver.connect(credentials)
-        try:
-            folders = await receiver.fetch_folders()
-        finally:
-            await receiver.disconnect()
-
-        # 匹配已发送文件夹（支持英文路径和中文显示名）
-        sent_keywords = {"sent", "sentmail", "sent items", "已发送"}
-        sent_folder = None
-        for f in folders:
-            path_lower = f.path.lower()
-            name_lower = f.name.lower() if f.name else ""
-            if any(kw in path_lower or kw in name_lower for kw in sent_keywords):
-                sent_folder = f.path
-                break
-
-        if not sent_folder:
-            logger.warning("定时发送后同步：未找到已发送文件夹")
-            return
-
-        await sync_folder_to_cache(account, sent_folder)
-        await sync_service.refresh_clients(account.id, sent_folder, user_uid=account.user_uid)
-        logger.info("定时发送后同步已发送文件夹: %s", sent_folder)
-    except Exception as e:
-        logger.error("定时发送后同步已发送文件夹失败: %s", e)
 
 
 def schedule_email(

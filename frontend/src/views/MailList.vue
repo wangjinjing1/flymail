@@ -23,6 +23,20 @@
       <button class="btn btn-primary btn-sm" @click="reauthorize(mailStore.currentAccountId)">重新授权</button>
     </div>
 
+    <div class="mail-shell" :class="{ detail: !!selectedMessage }">
+    <aside v-if="!isMobile" class="folder-sidebar">
+      <button
+        v-for="folder in mailStore.folders"
+        :key="folder.path"
+        class="folder-nav-item"
+        :class="{ active: mailStore.currentFolder === folder.path }"
+        @click="mailStore.setFolder(folder.path)"
+      >
+        <span class="folder-nav-name">{{ mailStore.folderDisplayName(folder.name) }}</span>
+        <span class="folder-nav-count">{{ getFolderCount(folder) }}</span>
+      </button>
+    </aside>
+
     <!-- 邮件列表视图 -->
     <div v-if="!selectedMessage" class="mail-list">
       <!-- 普通模式工具栏 -->
@@ -40,22 +54,31 @@
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <!-- 桌面端：文件夹名+数量 -->
-          <span v-else class="list-count">{{ mailStore.currentFolderName }} · {{ totalMessages }}封</span>
+          <span v-else class="list-count">
+            {{ mailStore.currentFolderName }} · {{ noReadStateFolder ? `全部 ${filterCounts.all}` : `未读 ${currentFolderUnreadCount}` }}
+          </span>
           <!-- 筛选按钮 -->
           <span class="toolbar-divider"></span>
           <button class="filter-btn" :class="{ active: readFilter === '' && !attachmentFilter }" @click="setReadFilter('')">全部 {{ filterCounts.all }}</button>
-          <button class="filter-btn" :class="{ active: readFilter === 'unread' }" @click="setReadFilter('unread')">未读 {{ filterCounts.unread }}</button>
-          <button class="filter-btn" :class="{ active: readFilter === 'read' }" @click="setReadFilter('read')">已读 {{ filterCounts.read }}</button>
+          <button v-if="!noReadStateFolder" class="filter-btn" :class="{ active: readFilter === 'unread' }" @click="setReadFilter('unread')">未读 {{ filterCounts.unread }}</button>
+          <button v-if="!noReadStateFolder" class="filter-btn" :class="{ active: readFilter === 'read' }" @click="setReadFilter('read')">已读 {{ filterCounts.read }}</button>
           <button class="filter-btn" :class="{ active: attachmentFilter }" @click="setAttachmentFilter()">附件 {{ filterCounts.attachments }}</button>
         </div>
         <div class="toolbar-right">
+          <input v-model.trim="searchKeyword" class="search-input" type="search" placeholder="搜索主题/发件人/正文" @keydown.enter="applySearch" />
+          <button class="btn-icon" @click="applySearch" title="搜索">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          </button>
+          <button v-if="searchKeyword" class="btn-icon" @click="clearSearch" title="清空搜索">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
           <!-- 移动端：筛选展开/收起按钮 -->
           <button class="btn-icon mobile-filter-toggle" :class="{ active: hasActiveFilter }" @click="showMobileFilters = !showMobileFilters">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
           </button>
-          <button class="btn-icon rebuild-btn" @click="rebuildSync" title="数据缓存不准确，可尝试清空缓存同步" :disabled="rebuilding">
+          <button class="btn-icon" @click="refreshLatestPage" title="刷新最近一页" :disabled="syncing || rebuilding">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.13-3.36L23 10"/><path d="M20.49 15A9 9 0 0 1 6.36 18.36L1 14"/>
             </svg>
           </button>
           <span v-if="rebuilding" class="sync-badge">{{ syncProgress || '同步中' }}</span>
@@ -69,8 +92,8 @@
           <div class="filter-backdrop" @click="showMobileFilters = false"></div>
           <div class="filter-dropdown-menu filter-dropdown-compact">
             <button class="filter-dropdown-item" :class="{ active: readFilter === '' && !attachmentFilter }" @click="setReadFilter(''); showMobileFilters = false">全部 {{ filterCounts.all }}</button>
-            <button class="filter-dropdown-item" :class="{ active: readFilter === 'unread' }" @click="setReadFilter('unread'); showMobileFilters = false">未读 {{ filterCounts.unread }}</button>
-            <button class="filter-dropdown-item" :class="{ active: readFilter === 'read' }" @click="setReadFilter('read'); showMobileFilters = false">已读 {{ filterCounts.read }}</button>
+            <button v-if="!noReadStateFolder" class="filter-dropdown-item" :class="{ active: readFilter === 'unread' }" @click="setReadFilter('unread'); showMobileFilters = false">未读 {{ filterCounts.unread }}</button>
+            <button v-if="!noReadStateFolder" class="filter-dropdown-item" :class="{ active: readFilter === 'read' }" @click="setReadFilter('read'); showMobileFilters = false">已读 {{ filterCounts.read }}</button>
             <button class="filter-dropdown-item" :class="{ active: attachmentFilter }" @click="setAttachmentFilter(); showMobileFilters = false">附件 {{ filterCounts.attachments }}</button>
           </div>
         </div>
@@ -90,7 +113,7 @@
               <polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
             </svg>
           </button>
-          <button class="select-btn mark-read" @click="batchMarkRead" :disabled="selectedIds.size === 0" title="标记已读">
+          <button v-if="!noReadStateFolder" class="select-btn mark-read" @click="batchMarkRead" :disabled="selectedIds.size === 0" title="标记已读">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>
             </svg>
@@ -147,7 +170,7 @@
           v-for="msg in messages"
           :key="msg.id"
           class="mail-item"
-          :class="{ unread: !msg.is_read, selected: selectMode && selectedIds.has(msg.id) }"
+          :class="{ unread: !noReadStateFolder && !msg.is_read, selected: selectMode && selectedIds.has(msg.id) }"
           @click="selectMode ? toggleSelect(msg.id) : selectMessage(msg)"
           @mouseenter="prefetchMessage(msg)"
           @contextmenu.prevent="enterSelectMode(msg.id)"
@@ -167,15 +190,15 @@
           <div class="mail-info">
             <div class="mail-main-row">
               <!-- 中列：已读/未读图标 + 主题 + 附件 -->
-              <svg v-if="!msg.is_read" class="mail-status-icon unread-icon" width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-              <svg v-else class="mail-status-icon read-icon" width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M461.816 79.279c30.333-20.364 69.97-20.373 100.311-0.021l384.19 257.69c9.256 6.208 13.947 16.672 13.216 27.044 0.108 1.548 0.096 3.1-0.034 4.64 0.33 1.778 0.501 3.61 0.501 5.483v495.903C960 919.714 919.706 960 870 960H154c-49.706 0-90-40.286-90-89.982V374.115c0-2.663 0.347-5.245 0.999-7.704-0.004-0.803 0.025-1.608 0.086-2.412-0.804-10.432 3.883-20.985 13.191-27.234z m70.259 519.057c-11.417-10.283-28.76-10.278-40.171 0.012L157.358 900.01h709.674zM124 425.237v424.071L381.796 616.85 124 425.237z m776 0.224L642.268 616.842 900 848.964V425.461zM528.7 129.074a30.005 30.005 0 0 0-33.437 0.007L143.678 365.114l283.558 210.762 24.483-22.075c33.891-30.56 85.223-30.88 119.48-0.952l1.034 0.916 24.56 22.121 283.833-210.763z"/></svg>
+              <svg v-if="!noReadStateFolder && !msg.is_read" class="mail-status-icon unread-icon" width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+              <svg v-else-if="!noReadStateFolder" class="mail-status-icon read-icon" width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M461.816 79.279c30.333-20.364 69.97-20.373 100.311-0.021l384.19 257.69c9.256 6.208 13.947 16.672 13.216 27.044 0.108 1.548 0.096 3.1-0.034 4.64 0.33 1.778 0.501 3.61 0.501 5.483v495.903C960 919.714 919.706 960 870 960H154c-49.706 0-90-40.286-90-89.982V374.115c0-2.663 0.347-5.245 0.999-7.704-0.004-0.803 0.025-1.608 0.086-2.412-0.804-10.432 3.883-20.985 13.191-27.234z m70.259 519.057c-11.417-10.283-28.76-10.278-40.171 0.012L157.358 900.01h709.674zM124 425.237v424.071L381.796 616.85 124 425.237z m776 0.224L642.268 616.842 900 848.964V425.461zM528.7 129.074a30.005 30.005 0 0 0-33.437 0.007L143.678 365.114l283.558 210.762 24.483-22.075c33.891-30.56 85.223-30.88 119.48-0.952l1.034 0.916 24.56 22.121 283.833-210.763z"/></svg>
               <span class="mail-subject">{{ msg.subject || '(无主题)' }}</span>
               <!-- 附件图标 -->
               <svg v-if="msg.has_attachments" class="att-badge" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </div>
           </div>
           <!-- 已读/未读标签 -->
-          <span class="mail-status-tag" :class="msg.is_read ? 'read' : 'unread'">
+          <span v-if="!noReadStateFolder" class="mail-status-tag" :class="msg.is_read ? 'read' : 'unread'">
             {{ msg.is_read ? '已读' : '未读' }}
           </span>
           <!-- 右列：日期（独立固定宽度列，保证最右侧对齐） -->
@@ -183,15 +206,26 @@
         </button>
       </div>
 
-      <div v-if="!selectMode && totalPages > 1" class="pagination">
-        <button class="page-btn" :disabled="currentPage <= 1" @click="goPage(currentPage - 1)">
+      <div v-if="!selectMode && totalPages > 1" class="pagination" :class="{ mobile: isMobile }">
+        <button class="page-btn page-nav" :disabled="currentPage <= 1" @click="goPage(currentPage - 1)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          <span v-if="isMobile">上一页</span>
         </button>
-        <template v-for="p in pageNumbers" :key="p">
-          <span v-if="p === '...'" class="page-ellipsis">...</span>
-          <button v-else class="page-btn" :class="{ active: p === currentPage }" @click="goPage(p as number)">{{ p }}</button>
+        <template v-if="isMobile">
+          <div class="page-mobile-summary">
+            <span class="page-mobile-current">{{ currentPage }}</span>
+            <span class="page-mobile-divider">/</span>
+            <span class="page-mobile-total">{{ totalPages }}</span>
+          </div>
         </template>
-        <button class="page-btn" :disabled="currentPage >= totalPages" @click="goPage(currentPage + 1)">
+        <template v-else>
+          <template v-for="p in pageNumbers" :key="p">
+            <span v-if="p === '...'" class="page-ellipsis">...</span>
+            <button v-else class="page-btn" :class="{ active: p === currentPage }" @click="goPage(p as number)">{{ p }}</button>
+          </template>
+        </template>
+        <button class="page-btn page-nav" :disabled="currentPage >= totalPages" @click="goPage(currentPage + 1)">
+          <span v-if="isMobile">下一页</span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
@@ -246,7 +280,9 @@
           </div>
         </div>
 
-        <div v-if="selectedMessage.body_html || selectedMessage.body_text" v-html="sanitizeHtml(selectedMessage.body_html) || selectedMessage.body_text" class="detail-content"></div>
+        <div v-if="selectedMessage.body_html || selectedMessage.body_text" class="detail-content-wrap">
+          <div v-html="sanitizeHtml(selectedMessage.body_html) || selectedMessage.body_text" class="detail-content"></div>
+        </div>
         <!-- 正文加载中：显示骨架屏 -->
         <div v-else class="body-skeleton">
           <div class="skeleton-line" style="width: 90%"></div>
@@ -271,7 +307,10 @@
             </div>
             <div class="att-info">
               <div class="att-name">{{ att.filename || '未命名附件' }}</div>
-              <div class="att-meta">{{ formatFileSize(att.size) }}</div>
+              <div class="att-meta">
+                {{ formatFileSize(att.size) }}
+                <span v-if="att.local_path" class="att-local-tag">已下载</span>
+              </div>
             </div>
             <div class="att-download">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -280,11 +319,12 @@
         </div>
       </div>
     </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue';
 import { useMailStore } from '../stores/mail';
 import { useUIStore } from '../stores/ui';
 import api from '../utils/api';
@@ -304,12 +344,33 @@ const selectedMessage = ref<Message | null>(null);
 const loading = ref(false);
 const totalMessages = ref(0);
 const currentPage = ref(1);
-const pageSize = 40;
+const pageSize = 50;
+const searchKeyword = ref('');
 const readFilter = ref('');
 const attachmentFilter = ref(false);
 const filterCounts = ref({ all: 0, unread: 0, read: 0, attachments: 0 });
 const showMobileFilters = ref(false);
 const hasActiveFilter = computed(() => readFilter.value !== '' || attachmentFilter.value);
+const noReadStateFolder = computed(() => {
+  const folder = (mailStore.currentFolder || '').toLowerCase();
+  return [
+    'sent',
+    'sent messages',
+    'sent items',
+    '[gmail]/sent mail',
+    'drafts',
+    '[gmail]/drafts',
+    'trash',
+    'deleted',
+    'deleted items',
+    'deleted messages',
+    '[gmail]/trash',
+  ].includes(folder);
+});
+const currentFolderUnreadCount = computed(() => {
+  const folder = mailStore.folders.find((item) => item.path === mailStore.currentFolder);
+  return folder?.unread_count || 0;
+});
 const syncing = ref(false);
 const rebuilding = ref(false);
 const syncProgress = ref('');
@@ -317,12 +378,18 @@ const syncProgress = ref('');
 interface MessagePageCache {
   messages: Message[];
   total: number;
-  unreadTotal: number;
+  filterCounts: {
+    all: number;
+    unread: number;
+    read: number;
+    attachments: number;
+  };
 }
 
 // 前端内存页缓存：账号 + 文件夹 + 页码 + 页大小作为 key，切换分类时先秒显旧数据，再后台刷新。
 const pageCache = new Map<string, MessagePageCache>();
 const totalPages = computed(() => Math.max(1, Math.ceil(totalMessages.value / pageSize)));
+const emptyFilterCounts = () => ({ all: 0, unread: 0, read: 0, attachments: 0 });
 
 /** 生成分页页码数组（含省略号） */
 const pageNumbers = computed(() => {
@@ -353,8 +420,10 @@ function goPage(page: number) {
 // ==================== 筛选 ====================
 
 function setReadFilter(filter: string) {
+  if (noReadStateFolder.value && filter) return;
   readFilter.value = filter;
   attachmentFilter.value = false;
+  selectedMessage.value = null;
   currentPage.value = 1;
   pageCache.clear();
   loadMessages();
@@ -365,6 +434,23 @@ function setAttachmentFilter() {
   if (attachmentFilter.value) {
     readFilter.value = '';
   }
+  selectedMessage.value = null;
+  currentPage.value = 1;
+  pageCache.clear();
+  loadMessages();
+}
+
+function applySearch() {
+  selectedMessage.value = null;
+  currentPage.value = 1;
+  pageCache.clear();
+  loadMessages();
+}
+
+function clearSearch() {
+  if (!searchKeyword.value) return;
+  searchKeyword.value = '';
+  selectedMessage.value = null;
   currentPage.value = 1;
   pageCache.clear();
   loadMessages();
@@ -410,6 +496,7 @@ async function batchDelete() {
 async function batchMarkRead() {
   if (selectedIds.value.size === 0) return;
   const count = selectedIds.value.size;
+  const unreadSelectedCount = messages.value.filter(m => selectedIds.value.has(m.id) && !m.is_read).length;
   uiStore.success(`正在标记 ${count} 封邮件...`);
   try {
     await api.post('/messages/batch-mark-read', {
@@ -417,19 +504,19 @@ async function batchMarkRead() {
       account_id: mailStore.currentAccountId,
       folder: mailStore.currentFolder,
     });
-    // 更新本地邮件列表中已选邮件的已读状态
     messages.value = messages.value.map(m =>
       selectedIds.value.has(m.id) ? { ...m, is_read: true } : m
     );
-    // 更新侧边栏未读数
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < unreadSelectedCount; i++) {
+      updateFilterCountsForReadChange(false, true);
       mailStore.decrementUnreadCount(mailStore.currentFolder);
     }
     exitSelectMode();
+    await refreshCurrentListState();
     uiStore.success(`已标记 ${count} 封邮件为已读`);
   } catch (e) {
     console.error('批量标记已读失败:', e);
-    uiStore.error('标记已读失败');
+    uiStore.error('批量标记已读失败');
   }
 }
 
@@ -453,11 +540,20 @@ function handleWsMessage(data: any) {
   } else if (data.type === 'cache_updated') {
     // 缓存同步完成：刷新列表和计数（此时缓存已有新邮件数据）
     if (!data.account_id || data.account_id === mailStore.currentAccountId) {
-      if (!data.folder || data.folder === mailStore.currentFolder) {
-        pageCache.clear();
-        loadMessages();
+      if (data.folder_counts) {
+        mailStore.updateFolderCounts(data.folder_counts);
       }
-      mailStore.loadFolderCounts();
+      if (!data.folder || data.folder === mailStore.currentFolder) {
+        if (selectedMessage.value || hasActiveFilter.value || searchKeyword.value) {
+          pageCache.clear();
+        } else {
+          pageCache.clear();
+          loadMessages();
+        }
+      }
+      if (!data.folder_counts) {
+        mailStore.loadFolderCounts();
+      }
     }
   } else if (data.type === 'rebuild_done') {
     // 重建同步完成：后端广播，前端静默刷新列表和计数，结束同步中状态
@@ -504,54 +600,106 @@ function handleWsMessage(data: any) {
       syncProgress.value = `同步中 (${data.completed}/${data.total})`;
     }
   } else if (data.type === 'message_state_changed') {
-    // 跨标签页邮件状态同步
     if (data.account_id === mailStore.currentAccountId) {
       if (data.action === 'mark_read' || data.action === 'mark_unread') {
         const isRead = data.action === 'mark_read';
         for (const uid of data.uids) {
-          const msg = messages.value.find(m => String(m.id) === String(uid));
-          if (msg) msg.is_read = isRead;
+          const msg = messages.value.find(m => String(m.uid) === String(uid));
+          if (msg) {
+            updateFilterCountsForReadChange(!!msg.is_read, isRead);
+            msg.is_read = isRead;
+          }
         }
-        mailStore.loadFolderCounts();
       } else if (data.action === 'delete' || data.action === 'move') {
-        messages.value = messages.value.filter(m => !data.uids.includes(String(m.id)));
-        totalMessages.value = Math.max(0, totalMessages.value - data.uids.length);
-        mailStore.loadFolderCounts();
+        messages.value = messages.value.filter(m => !data.uids.includes(String(m.uid)));
+      }
+      if (selectedMessage.value || hasActiveFilter.value || searchKeyword.value) {
+        refreshCurrentListCounts();
+      } else {
+        refreshCurrentListState();
       }
     }
   }
 }
 
+function updateFilterCountsForReadChange(wasRead: boolean, isRead: boolean) {
+  if (wasRead === isRead) return;
+  if (!wasRead && isRead) {
+    filterCounts.value = {
+      ...filterCounts.value,
+      unread: Math.max(0, filterCounts.value.unread - 1),
+      read: filterCounts.value.read + 1,
+    };
+    if (readFilter.value === 'unread') {
+      totalMessages.value = Math.max(0, totalMessages.value - 1);
+    }
+  } else if (wasRead && !isRead) {
+    filterCounts.value = {
+      ...filterCounts.value,
+      unread: filterCounts.value.unread + 1,
+      read: Math.max(0, filterCounts.value.read - 1),
+    };
+    if (readFilter.value === 'read') {
+      totalMessages.value = Math.max(0, totalMessages.value - 1);
+    }
+  }
+}
+
+async function refreshCurrentListState() {
+  pageCache.clear();
+  selectedMessage.value = null;
+  await loadMessages();
+  await mailStore.loadFolderCounts();
+}
+
+async function refreshCurrentListCounts() {
+  pageCache.clear();
+  await loadMessages();
+  await mailStore.loadFolderCounts();
+}
+
 function getPageCacheKey() {
-  return `${mailStore.currentAccountId}::${mailStore.currentFolder}::${currentPage.value}::${pageSize}`;
+  return [
+    mailStore.currentAccountId,
+    mailStore.currentFolder,
+    currentPage.value,
+    pageSize,
+    readFilter.value || 'all',
+    attachmentFilter.value ? 'attachments' : 'no-attachments-filter',
+    searchKeyword.value || 'no-search',
+  ].join('::');
 }
 
-function applyCachedPage(cache: MessagePageCache) {
-  messages.value = cache.messages;
-  totalMessages.value = cache.total;
-  mailStore.updateFolderCounts(mailStore.currentFolder, cache.total, cache.unreadTotal);
+function normalizeMessagesForDisplay(items: Message[]) {
+  if (noReadStateFolder.value || filterCounts.value.unread !== 0) return items;
+  return items.map((item) => item.is_read ? item : { ...item, is_read: true });
 }
 
-/** 将当前页数据保存到内存缓存 */
+function resetVisibleListState() {
+  messages.value = [];
+  totalMessages.value = 0;
+  filterCounts.value = emptyFilterCounts();
+  selectedMessage.value = null;
+}
+
+/** 缓存当前页数据 */
 function saveCurrentPageCache(data: any) {
   pageCache.set(getPageCacheKey(), {
     messages: data.messages || [],
     total: data.total || 0,
-    unreadTotal: data.unread_total || 0,
+    filterCounts: data.filter_counts || { all: 0, unread: 0, read: 0, attachments: 0 },
   });
 }
 
-// 监听文件夹和账号变化，重新加载邮件
-// 切换时立即清空列表，避免请求旧 UID 导致 404
 watch(
   () => [mailStore.currentFolder, mailStore.currentAccountId],
   () => {
-    messages.value = [];
-    selectedMessage.value = null;
+    resetVisibleListState();
     currentPage.value = 1;
     readFilter.value = '';
     attachmentFilter.value = false;
     pageCache.clear();
+    loadVersion++;
     loadMessages();
   }
 );
@@ -559,6 +707,19 @@ watch(
 onMounted(() => {
   loadMessages();
   connectWs();
+});
+
+onActivated(() => {
+  if (selectedMessage.value) {
+    mailStore.loadFolderCounts();
+    return;
+  }
+  if (!selectedMessage.value && messages.value.length === 0) {
+    loadMessages();
+    return;
+  }
+  loadMessages();
+  mailStore.loadFolderCounts();
 });
 
 onUnmounted(() => {
@@ -571,7 +732,36 @@ onUnmounted(() => {
 /** 切换账号 */
 async function switchAccount(id: string) {
   mailStore.setAccount(id);
+  readFilter.value = '';
+  attachmentFilter.value = false;
+  searchKeyword.value = '';
   await mailStore.loadFolders();
+  pageCache.clear();
+  selectedMessage.value = null;
+  currentPage.value = 1;
+  await loadMessages();
+}
+
+async function refreshLatestPage() {
+  if (syncing.value || rebuilding.value) return;
+  syncing.value = true;
+  try {
+    const params: Record<string, string | number> = {
+      folder: mailStore.currentFolder,
+      page_size: pageSize,
+    };
+    if (mailStore.currentAccountId) params.account_id = mailStore.currentAccountId;
+    await api.get('/messages/refresh', { params });
+    currentPage.value = 1;
+    pageCache.clear();
+    await loadMessages();
+    await mailStore.loadFolderCounts();
+  } catch (e) {
+    console.error('刷新邮件失败:', e);
+    uiStore.error('刷新邮件失败');
+  } finally {
+    syncing.value = false;
+  }
 }
 
 /** 重新授权指定账号（复用添加账号的 OAuth 流程） */
@@ -628,15 +818,9 @@ async function onDeleteMessage() {
 
 /** 加载邮件列表（带竞态保护：只接受最新请求的结果） */
 async function loadMessages() {
-  const cachedPage = pageCache.get(getPageCacheKey());
-  if (cachedPage) {
-    applyCachedPage(cachedPage);
-  }
-
-  // 有当前页缓存时直接显示缓存并后台刷新；没有任何内容时才显示加载中。
-  const showLoading = !cachedPage && messages.value.length === 0;
-  loading.value = showLoading;
-  syncing.value = showLoading;
+  messages.value = [];
+  loading.value = true;
+  syncing.value = true;
   const version = ++loadVersion;
   try {
     const params: Record<string, string | number> = {
@@ -647,7 +831,9 @@ async function loadMessages() {
     if (mailStore.currentAccountId) params.account_id = mailStore.currentAccountId;
     if (readFilter.value) params.read_filter = readFilter.value;
     if (attachmentFilter.value) params.attachment_filter = 'true';
-    const data = await api.get('/messages', { params }) as any;
+    if (searchKeyword.value) params.keyword = searchKeyword.value;
+    const endpoint = searchKeyword.value ? '/messages/search' : '/messages';
+    const data = await api.get(endpoint, { params }) as any;
     // 只接受最新版本的结果，丢弃旧请求的响应
     if (version !== loadVersion) return;
     // Outlook 连接异常时，后端返回 reconnecting: true，前端展示友好提示
@@ -655,20 +841,22 @@ async function loadMessages() {
       uiStore.error('邮箱连接异常，正在重新连接，请稍后再试');
       return;
     }
+    const nextMessages = data.messages || [];
+    const nextTotal = data.total || 0;
+    const nextTotalPages = Math.max(1, Math.ceil(nextTotal / pageSize));
+    if (currentPage.value > nextTotalPages && nextTotal > 0) {
+      currentPage.value = nextTotalPages;
+      return await loadMessages();
+    }
     saveCurrentPageCache(data);
-    messages.value = data.messages || [];
-    totalMessages.value = data.total || 0;
+    totalMessages.value = nextTotal;
     // 更新筛选计数
     if (data.filter_counts) {
       filterCounts.value = data.filter_counts;
     }
+    messages.value = normalizeMessagesForDisplay(nextMessages);
     // 用 list_messages API 返回的数据更新侧边栏文件夹计数
     // 收件箱显示未读数，其他文件夹显示邮件总数
-    mailStore.updateFolderCounts(
-      mailStore.currentFolder,
-      data.total || 0,
-      data.unread_total || 0,
-    );
   } catch (e) {
     if (version !== loadVersion) return;
     console.error('加载邮件失败:', e);
@@ -682,40 +870,6 @@ async function loadMessages() {
       nextTick(() => { prefetchVisibleMessages(); });
     }
   }
-}
-
-/** 重建同步：清空当前账号缓存并重新拉取 */
-async function rebuildSync() {
-  if (rebuilding.value) return;
-
-  const accountId = mailStore.currentAccountId;
-  if (!accountId) return;
-
-  // 使用项目统一的确认弹窗
-  const ok = await uiStore.showConfirm({
-    title: '清空缓存同步',
-    message: '数据缓存不准确，可尝试清空缓存同步。将清空当前账号的本地缓存并重新从邮箱拉取所有邮件。',
-    confirmText: '清空并同步',
-    danger: true,
-  });
-  if (!ok) return;
-
-  rebuilding.value = true;
-  syncing.value = true;
-  syncProgress.value = '同步中';
-  try {
-    await api.post(`/accounts/${accountId}/rebuild-sync`);
-    // 后端立即返回，同步在后台执行。清空前端缓存并刷新文件夹
-    pageCache.clear();
-    await mailStore.loadFolders();
-    // 保持 syncing 状态（按钮转圈），等待后端 WebSocket 推送 rebuild_done 后自动结束
-  } catch (e: any) {
-    console.error('重建同步失败:', e);
-    uiStore.error('重建同步失败');
-    rebuilding.value = false;
-    syncing.value = false;
-  }
-  // 注意：成功时不重置 rebuilding/syncing，由 WebSocket rebuild_done 消息处理
 }
 
 /** 选择邮件查看详情（带竞态保护）
@@ -745,11 +899,16 @@ async function selectMessage(msg: Message) {
 
     // 未读邮件：调用 IMAP STORE +FLAGS \Seen 标记已读，同步到邮箱服务器
     if (!msg.is_read) {
+      const wasRead = !!msg.is_read;
       // 直接修改 messages 数组中对应项的 is_read，确保 Vue 响应式追踪
       const idx = messages.value.findIndex((m: Message) => m.id === msg.id);
       if (idx !== -1) {
         messages.value[idx] = { ...messages.value[idx], is_read: true };
       }
+      if (selectedMessage.value) {
+        selectedMessage.value = { ...selectedMessage.value, is_read: true };
+      }
+      updateFilterCountsForReadChange(wasRead, true);
       // 异步调用标记已读API，不阻塞界面
       api.post('/mark-read', {
         message_id: msg.id,
@@ -759,6 +918,7 @@ async function selectMessage(msg: Message) {
 
       // 更新侧边栏未读数（收件箱减1）
       mailStore.decrementUnreadCount(mailStore.currentFolder);
+      refreshCurrentListCounts();
     }
   } catch (e: any) {
     if (version !== loadVersion) return;
@@ -874,10 +1034,247 @@ function downloadAttachment(att: Attachment) {
 
 <style scoped>
 .mail-view {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mail-view,
+.mail-shell,
+.mail-list {
+  box-sizing: border-box;
+}
+
+.mail-shell {
+  width: 100%;
+  min-width: 0;
+}
+
+.mail-list {
+  min-width: 0;
+  width: 100%;
+}
+
+.detail-body,
+.detail-content-wrap,
+.detail-content {
+  min-width: 0;
+}
+
+.detail-content {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.mail-item {
+  box-sizing: border-box;
+}
+
+.mail-item:not(.unread) {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.mail-item:not(.unread) .mail-from,
+.mail-item:not(.unread) .mail-subject,
+.mail-item:not(.unread) .mail-date {
+  color: var(--text-tertiary);
+}
+
+.mail-item:not(.unread) .mail-avatar {
+  opacity: 0.76;
+}
+
+.mail-item:not(.unread):hover {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.toolbar-right {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.search-input {
+  min-width: 0;
+}
+
+.mail-main-row {
+  min-width: 0;
+}
+
+.mail-info {
+  min-width: 0;
+}
+
+@media (max-width: 768px) {
+  .mail-view {
+    overflow: visible;
+  }
+
+  .mail-list,
+  .mail-detail {
+    width: 100%;
+  }
+
+  .list-toolbar {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .toolbar-right {
+    width: 100%;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+  }
+
+  .search-input {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+
+  .list-items {
+    overflow-x: auto;
+  }
+
+  .mail-item {
+    display: flex;
+    align-items: center;
+    min-width: 560px;
+    width: max-content;
+    padding: 10px 12px;
+  }
+
+  .mail-sender {
+    width: 88px;
+    min-width: 88px;
+    gap: 8px;
+    padding-right: 8px;
+  }
+
+  .mail-info {
+    min-width: 0;
+  }
+
+  .mail-main-row {
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .mail-status-tag {
+    width: 40px;
+    margin-left: 0;
+  }
+
+  .mail-date {
+    width: 54px;
+    margin-left: 0;
+  }
+
+  .pagination {
+    position: sticky;
+    bottom: 0;
+    left: 0;
+    right: 0;
+  }
+
+  .page-btn.page-nav {
+    min-width: 84px;
+    padding: 0 8px;
+  }
+
+  .detail-body {
+    overflow-x: auto;
+    overflow-y: auto;
+  }
+
+  .detail-content {
+    padding: var(--space-3) var(--space-4);
+    min-width: 0;
+  }
+
+  .detail-content :deep(table) {
+    min-width: 100%;
+    width: max-content;
+  }
+}
+
+.mail-view {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.mail-shell {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  overflow: hidden;
+}
+
+.mail-shell.detail {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.folder-sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.folder-nav-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.folder-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.folder-nav-item.active {
+  background: rgba(0, 122, 255, 0.1);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.folder-nav-name,
+.folder-nav-count {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.folder-nav-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-nav-count {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  flex-shrink: 0;
 }
 
 /* 账号 Tab 切换 */
@@ -995,10 +1392,14 @@ function downloadAttachment(att: Attachment) {
 /* ==================== 邮件列表 ==================== */
 .mail-list {
   flex: 1;
+  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
 }
 
 /* 普通模式工具栏 */
@@ -1006,21 +1407,46 @@ function downloadAttachment(att: Attachment) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .toolbar-left {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .toolbar-right {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.search-input {
+  max-width: 100%;
+  width: 220px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.12);
 }
 
 /* 筛选按钮（工具栏内） */
@@ -1081,14 +1507,6 @@ function downloadAttachment(att: Attachment) {
 }
 
 /* 重建同步按钮旋转动画 */
-.rebuild-btn:disabled svg {
-  animation: spin 1s linear infinite;
-}
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
 /* 多选模式工具栏 */
 .select-toolbar {
   display: flex;
@@ -1218,6 +1636,8 @@ function downloadAttachment(att: Attachment) {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
   font-weight: var(--font-medium);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .list-loading,
@@ -1248,8 +1668,11 @@ function downloadAttachment(att: Attachment) {
 /* 邮件列表项 */
 .list-items {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .mail-item {
@@ -1263,6 +1686,7 @@ function downloadAttachment(att: Attachment) {
   cursor: pointer;
   transition: background var(--transition-fast);
   width: 100%;
+  min-width: 640px;
   text-align: left;
   font-family: inherit;
   min-height: 52px;
@@ -1352,11 +1776,40 @@ function downloadAttachment(att: Attachment) {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 10px 16px;
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
   background: var(--bg-primary);
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+}
+
+.page-nav {
+  gap: 4px;
+}
+
+.page-mobile-summary {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  min-width: 72px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.page-mobile-current {
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.page-mobile-divider,
+.page-mobile-total {
+  color: var(--text-tertiary);
 }
 
 .page-btn {
@@ -1482,10 +1935,14 @@ function downloadAttachment(att: Attachment) {
 /* ==================== 邮件详情 ==================== */
 .mail-detail {
   flex: 1;
+  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
 }
 
 .detail-toolbar {
@@ -1606,15 +2063,40 @@ function downloadAttachment(att: Attachment) {
 .detail-body {
   flex: 1;
   overflow-y: auto;
+  overflow-x: auto;
+  min-height: 0;
+  min-width: 0;
   font-size: var(--text-sm);
   line-height: 1.7;
   color: var(--text-primary);
   -webkit-overflow-scrolling: touch;
 }
 
+.detail-content-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* 正文内容区域 */
 .detail-content {
   padding: var(--space-5);
+  min-width: min-content;
+}
+
+.detail-content :deep(*) {
+  max-width: 100%;
+}
+
+.detail-content :deep(table) {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.detail-content :deep(pre),
+.detail-content :deep(blockquote) {
+  overflow-x: auto;
 }
 
 /* 邮件正文中的图片和链接 */
@@ -1681,6 +2163,21 @@ function downloadAttachment(att: Attachment) {
   font-size: 11px;
   color: var(--text-tertiary, #999);
   margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.att-local-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(52, 199, 89, 0.12);
+  color: #1f8a46;
+  font-size: 11px;
+  font-weight: 600;
 }
 .att-download {
   flex-shrink: 0;
@@ -1698,20 +2195,79 @@ function downloadAttachment(att: Attachment) {
 
 /* 移动端适配 */
 @media (max-width: 768px) {
+  .mail-shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .mail-shell.detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mail-view {
+    min-height: 0;
+  }
+
+  .mail-list,
+  .mail-detail {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
   /* 移动端缩小发件人列宽度，给主题更多空间 */
-  .mail-sender { width: 120px; }
+  .mail-sender {
+    width: 88px;
+    gap: 10px;
+    padding-right: 8px;
+  }
 
   /* 工具栏精简：只保留多选+文件夹+筛选图标+同步 */
-  .list-toolbar { padding: 8px 12px; }
+  .list-toolbar {
+    position: relative;
+    padding: 8px 12px;
+    gap: 8px;
+    align-items: center;
+    flex-direction: row;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   .toolbar-left .toolbar-divider { display: none; }
-  .toolbar-left .filter-btn { display: none; }
+  .toolbar-left .filter-btn { display: inline-flex; }
+  .toolbar-left {
+    width: auto;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: visible;
+    gap: 6px;
+  }
+  .toolbar-left .filter-btn {
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    min-height: 28px;
+    padding: 4px 9px;
+  }
+  .toolbar-right {
+    width: auto;
+    gap: 6px;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+  }
 
   /* 移动端筛选切换按钮 */
-  .mobile-filter-toggle { display: flex; }
+  .mobile-filter-toggle { display: none; }
   .mobile-filter-toggle.active { color: var(--accent-blue); }
-
-  /* 工具栏作为下拉菜单的定位基准 */
-  .list-toolbar { position: relative; }
+  .search-input {
+    flex: 0 0 auto;
+    width: min(44vw, 150px);
+    min-width: 0;
+  }
 
   /* 移动端筛选下拉菜单：相对工具栏定位 */
   .mobile-filter-dropdown {
@@ -1777,6 +2333,69 @@ function downloadAttachment(att: Attachment) {
   .account-tabs {
     padding: var(--space-2) var(--space-3);
     overflow-x: auto;
+  }
+
+  .list-items {
+    padding-bottom: 0;
+  }
+
+  .mail-item {
+    padding: 10px 12px;
+    min-height: 60px;
+    min-width: 560px;
+  }
+
+  .mail-avatar {
+    width: 30px;
+    height: 30px;
+    font-size: 12px;
+  }
+
+  .mail-from,
+  .mail-subject {
+    font-size: 12px;
+  }
+
+  .mail-status-tag {
+    width: 36px;
+    font-size: 9px;
+    margin-left: 6px;
+  }
+
+  .mail-date {
+    width: 54px;
+    font-size: 10px;
+    margin-left: 6px;
+  }
+
+  .pagination {
+    justify-content: space-between;
+    gap: 6px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.06);
+    flex-wrap: nowrap;
+  }
+
+  .page-btn {
+    min-width: 44px;
+    height: 36px;
+    border-radius: 10px;
+    background: var(--bg-secondary);
+  }
+
+  .page-btn.page-nav {
+    min-width: 92px;
+    padding: 0 10px;
+    justify-content: center;
+  }
+
+  .page-ellipsis {
+    width: 18px;
+  }
+
+  .page-mobile-summary {
+    flex: 1;
+    min-width: 0;
   }
 
   /* iOS风格文件夹选择按钮 */
@@ -1896,12 +2515,54 @@ function downloadAttachment(att: Attachment) {
     padding: var(--space-3) var(--space-4) var(--space-2);
   }
 
+  .detail-body,
+  .detail-content-wrap,
+  .detail-content {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .detail-body {
+    overflow-x: hidden;
+  }
+
+  .detail-content-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .detail-toolbar {
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .detail-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .btn-action span,
+  .btn-back span {
+    display: none;
+  }
+
+  .btn-action,
+  .btn-back {
+    min-width: 36px;
+    justify-content: center;
+    padding: 6px 8px;
+  }
+
   .detail-subject {
     font-size: var(--text-lg);
   }
 
   .detail-content {
     padding: var(--space-3) var(--space-4);
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 }
 

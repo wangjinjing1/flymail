@@ -2,24 +2,18 @@
   <div class="history-sync-page">
     <div class="page-header">
       <div>
-        <h2 class="page-title">&#x5386;&#x53F2;&#x90AE;&#x4EF6;&#x540C;&#x6B65;</h2>
-        <p class="page-subtitle">
-          &#x67E5;&#x770B;&#x6BCF;&#x4E2A;&#x90AE;&#x7BB1;&#x7684;&#x540C;&#x6B65;&#x8FDB;&#x5EA6;&#xFF0C;&#x652F;&#x6301;&#x6682;&#x505C;&#x3001;&#x7EE7;&#x7EED;&#x548C;&#x624B;&#x52A8;&#x5237;&#x65B0;&#x3002;
-        </p>
+        <h2 class="page-title">历史邮件同步</h2>
+        <p class="page-subtitle">查看每个邮箱的同步进度，支持暂停、继续、刷新、清空和失败重试。</p>
       </div>
-      <button class="btn btn-secondary" :disabled="loading" @click="loadJobs(true)">
-        &#x5237;&#x65B0;
-      </button>
+      <button class="btn btn-secondary" :disabled="loading" @click="loadJobs(true)">刷新进度</button>
     </div>
 
     <div v-if="loading && jobs.length === 0" class="loading-state">
       <div class="loading-dot"></div>
-      <span>&#x52A0;&#x8F7D;&#x4E2D;...</span>
+      <span>加载中...</span>
     </div>
 
-    <div v-else-if="jobs.length === 0" class="empty-state">
-      &#x6682;&#x65E0;&#x90AE;&#x7BB1;&#x8D26;&#x53F7;
-    </div>
+    <div v-else-if="jobs.length === 0" class="empty-state">暂无邮箱账号</div>
 
     <div v-else class="job-list">
       <section v-for="item in jobs" :key="item.account_id" class="job-card">
@@ -27,76 +21,45 @@
           <div>
             <div class="job-title-row">
               <h3 class="job-title">{{ item.email }}</h3>
-              <span class="status-badge" :class="statusClass(item.status)">
-                {{ statusText(item.status) }}
-              </span>
+              <span class="status-badge" :class="statusClass(item.status)">{{ statusText(item.status) }}</span>
             </div>
             <p class="job-provider">{{ providerName(item.provider) }}</p>
           </div>
           <div class="job-actions">
-            <button
-              v-if="canStart(item.status)"
-              class="btn btn-primary"
-              @click="startJob(item.account_id)"
-            >
-              &#x5F00;&#x59CB;
-            </button>
-            <button
-              v-if="canPause(item.status)"
-              class="btn btn-secondary"
-              @click="pauseJob(item.account_id)"
-            >
-              &#x6682;&#x505C;
-            </button>
-            <button
-              v-if="canResume(item.status)"
-              class="btn btn-primary"
-              @click="resumeJob(item.account_id)"
-            >
-              &#x7EE7;&#x7EED;
-            </button>
-            <button class="btn btn-secondary" @click="queryJob(item.account_id)">
-              &#x67E5;&#x8BE2;
-            </button>
+            <button v-if="canPause(item.status)" class="btn btn-secondary" @click="pauseJob(item.account_id)">暂停</button>
+            <button v-else-if="canResume(item.status)" class="btn btn-primary" @click="resumeJob(item.account_id)">继续</button>
+            <button v-else class="btn btn-secondary" disabled>暂停/继续</button>
+            <button class="btn btn-warning" :disabled="isFullSyncActive(item)" @click="refreshSync(item)">刷新同步</button>
+            <button class="btn btn-danger" :disabled="isClearActive(item.clear_job)" @click="clearJob(item)">清空</button>
+            <button v-if="canRetry(item.status)" class="btn btn-primary" @click="retryJob(item.account_id)">重试</button>
           </div>
+        </div>
+
+        <div v-if="item.clear_job && item.clear_job.status !== 'completed'" class="clear-job-row">
+          <span class="clear-job-label">清空任务：<strong>{{ statusText(item.clear_job.status, 'clear_cache') }}</strong></span>
+          <span>已删除文件：{{ item.clear_job.downloaded_attachments || 0 }}</span>
         </div>
 
         <div class="progress-grid">
           <div class="progress-item">
-            <span class="progress-label">&#x6587;&#x4EF6;&#x5939;</span>
-            <span class="progress-value">
-              {{ item.job?.completed_folders || 0 }} / {{ item.job?.total_folders || 0 }}
-            </span>
+            <span class="progress-label">已同步邮件</span>
+            <span class="progress-value">{{ syncedMessageCount(item) }} / {{ totalMessageCount(item) }}</span>
           </div>
           <div class="progress-item">
-            <span class="progress-label">&#x5DF2;&#x540C;&#x6B65;&#x90AE;&#x4EF6;</span>
-            <span class="progress-value">{{ item.job?.fetched_messages || 0 }}</span>
-          </div>
-          <div class="progress-item">
-            <span class="progress-label">&#x5DF2;&#x4E0B;&#x8F7D;&#x9644;&#x4EF6;</span>
+            <span class="progress-label">已下载附件</span>
             <span class="progress-value">{{ item.job?.downloaded_attachments || 0 }}</span>
           </div>
           <div class="progress-item">
-            <span class="progress-label">&#x5185;&#x5D4C;&#x56FE;&#x7247;</span>
+            <span class="progress-label">内嵌图片</span>
             <span class="progress-value">{{ item.job?.downloaded_inline_images || 0 }}</span>
           </div>
-        </div>
-
-        <div class="folder-row">
-          <span>
-            &#x5F53;&#x524D;&#x6587;&#x4EF6;&#x5939;&#xFF1A;{{ item.job?.current_folder || '--' }}
-          </span>
-          <span>&#x9875;&#x7801;&#xFF1A;{{ item.job?.current_page || 1 }}</span>
-          <span>UID&#xFF1A;{{ item.job?.current_uid || 0 }}</span>
         </div>
 
         <div v-if="item.job?.error_message" class="error-box">{{ item.job.error_message }}</div>
 
         <div class="time-row">
-          <span>&#x66F4;&#x65B0;&#x65F6;&#x95F4;&#xFF1A;{{ formatTime(item.job?.updated_at) }}</span>
-          <span v-if="item.job?.finished_at">
-            &#x5B8C;&#x6210;&#x65F6;&#x95F4;&#xFF1A;{{ formatTime(item.job?.finished_at) }}
-          </span>
+          <span>更新时间：{{ formatTime(item.job?.updated_at) }}</span>
+          <span v-if="item.job?.finished_at">完成时间：{{ formatTime(item.job?.finished_at) }}</span>
         </div>
       </section>
     </div>
@@ -105,12 +68,14 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { useWebSocket } from '../composables/useWebSocket';
 import { useUIStore } from '../stores/ui';
 import api from '../utils/api';
 import { providerName } from '../utils/provider';
 
 interface HistorySyncJob {
   id: string
+  job_type?: string
   status: string
   current_folder: string
   current_page: number
@@ -125,18 +90,49 @@ interface HistorySyncJob {
   finished_at: number
 }
 
+interface FolderProgressItem {
+  folder: string
+  label: string
+  cached_count: number
+  summary_count?: number
+  total_count: number
+  unread_count: number
+  is_synced: boolean
+  sync_job?: HistorySyncJob | null
+  clear_job?: HistorySyncJob | null
+}
+
 interface HistorySyncItem {
   account_id: string
   email: string
   provider: string
   status: string
   job: HistorySyncJob | null
+  clear_job?: HistorySyncJob | null
+  folder_progress?: FolderProgressItem[]
 }
 
 const ui = useUIStore();
 const jobs = ref<HistorySyncItem[]>([]);
 const loading = ref(false);
 let pollTimer: number | null = null;
+let wsRefreshTimer: number | null = null;
+
+const { connect: connectWs, disconnect: disconnectWs } = useWebSocket(handleWsMessage);
+
+function scheduleLoadJobs() {
+  if (wsRefreshTimer) window.clearTimeout(wsRefreshTimer);
+  wsRefreshTimer = window.setTimeout(() => {
+    wsRefreshTimer = null;
+    loadJobs();
+  }, 200);
+}
+
+function handleWsMessage(data: any) {
+  if (data.type === 'cache_updated' || data.type === 'rebuild_done') {
+    scheduleLoadJobs();
+  }
+}
 
 async function loadJobs(showError = false) {
   loading.value = true;
@@ -144,62 +140,93 @@ async function loadJobs(showError = false) {
     const data = await api.get('/history-sync/jobs') as any;
     jobs.value = data.jobs || [];
   } catch (e: any) {
-    if (showError) {
-      ui.error(e.message || '\u52A0\u8F7D\u540C\u6B65\u72B6\u6001\u5931\u8D25');
-    }
+    if (showError) ui.error(e.message || '加载同步状态失败');
   } finally {
     loading.value = false;
   }
 }
 
-async function queryJob(accountId: string) {
+async function refreshSync(item: HistorySyncItem) {
+  const ok = await ui.showConfirm({
+    title: '刷新同步',
+    message: `确定要补全同步 ${item.email} 的历史邮件吗？本地已有邮件和附件会复用，不会重复下载。`,
+    confirmText: '确认刷新同步',
+  });
+  if (!ok) return;
   try {
-    const data = await api.get(`/history-sync/jobs/${accountId}`) as any;
-    const index = jobs.value.findIndex(item => item.account_id === accountId);
-    if (index >= 0) {
-      jobs.value[index] = {
-        ...jobs.value[index],
-        status: data.job?.status || 'idle',
-        job: data.job || null,
-      };
+    const data = await api.post(`/history-sync/jobs/${item.account_id}/start`) as any;
+    if (!data?.success) {
+      ui.error(data?.message || '刷新同步失败');
+      return;
     }
-  } catch (e: any) {
-    ui.error(e.message || '\u67E5\u8BE2\u540C\u6B65\u72B6\u6001\u5931\u8D25');
-  }
-}
-
-async function startJob(accountId: string) {
-  try {
-    await api.post(`/history-sync/jobs/${accountId}/start`);
-    ui.success('\u5DF2\u5F00\u59CB\u540C\u6B65');
+    ui.success('已开始刷新同步');
     await loadJobs();
   } catch (e: any) {
-    ui.error(e.message || '\u540C\u6B65\u542F\u52A8\u5931\u8D25');
+    ui.error(e.message || '刷新同步失败');
   }
 }
 
 async function pauseJob(accountId: string) {
   try {
     await api.post(`/history-sync/jobs/${accountId}/pause`);
-    ui.success('\u5DF2\u6682\u505C\u540C\u6B65');
+    ui.success('已暂停同步');
     await loadJobs();
   } catch (e: any) {
-    ui.error(e.message || '\u6682\u505C\u5931\u8D25');
+    ui.error(e.message || '暂停失败');
   }
 }
 
 async function resumeJob(accountId: string) {
   try {
     await api.post(`/history-sync/jobs/${accountId}/resume`);
-    ui.success('\u5DF2\u7EE7\u7EED\u540C\u6B65');
+    ui.success('已继续同步');
     await loadJobs();
   } catch (e: any) {
-    ui.error(e.message || '\u7EE7\u7EED\u5931\u8D25');
+    ui.error(e.message || '继续失败');
   }
 }
 
-function canStart(status: string) {
-  return !status || status === 'idle' || status === 'completed' || status === 'failed';
+async function retryJob(accountId: string) {
+  try {
+    const data = await api.post(`/history-sync/jobs/${accountId}/retry`) as any;
+    if (!data?.success) {
+      ui.error(data?.message || '重试失败');
+      return;
+    }
+    ui.success('已从失败断点重试');
+    await loadJobs();
+  } catch (e: any) {
+    ui.error(e.message || '重试失败');
+  }
+}
+
+async function clearJob(item: HistorySyncItem) {
+  const ok = await ui.showConfirm({
+    title: '清空本地缓存',
+    message: `确定要清空 ${item.email} 的本地邮件、附件和图片缓存吗？这个过程会在后台执行。`,
+    confirmText: '确认清空',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const data = await api.post(`/history-sync/jobs/${item.account_id}/clear`) as any;
+    if (!data?.success) {
+      ui.error(data?.message || '启动清空失败');
+      return;
+    }
+    ui.success('已开始后台清空');
+    await loadJobs();
+  } catch (e: any) {
+    ui.error(e.message || '启动清空失败');
+  }
+}
+
+function isFullSyncActive(item: HistorySyncItem) {
+  return item.status === 'pending' || item.status === 'running';
+}
+
+function isClearActive(job?: HistorySyncJob | null) {
+  return Boolean(job && (job.status === 'pending' || job.status === 'running'));
 }
 
 function canPause(status: string) {
@@ -210,20 +237,36 @@ function canResume(status: string) {
   return status === 'paused';
 }
 
+function canRetry(status: string) {
+  return status === 'failed';
+}
+
 function statusClass(status: string) {
   return `status-${status || 'idle'}`;
 }
 
-function statusText(status: string) {
+function statusText(status: string, jobType = 'history_sync') {
   const textMap: Record<string, string> = {
-    idle: '\u672A\u5F00\u59CB',
-    pending: '\u7B49\u5F85\u4E2D',
-    running: '\u540C\u6B65\u4E2D',
-    paused: '\u5DF2\u6682\u505C',
-    completed: '\u5DF2\u5B8C\u6210',
-    failed: '\u5931\u8D25',
+    idle: '未开始',
+    pending: '等待中',
+    running: jobType === 'clear_cache' || jobType.startsWith('folder_clear') ? '清理中' : '同步中',
+    paused: '已暂停',
+    completed: '已完成',
+    failed: '失败',
   };
-  return textMap[status] || status;
+  return textMap[status] || status || '未开始';
+}
+
+function folderProgress(item: HistorySyncItem) {
+  return item.folder_progress || [];
+}
+
+function syncedMessageCount(item: HistorySyncItem) {
+  return folderProgress(item).reduce((sum, folder) => sum + (folder.cached_count || 0), 0);
+}
+
+function totalMessageCount(item: HistorySyncItem) {
+  return folderProgress(item).reduce((sum, folder) => sum + (folder.total_count || 0), 0);
 }
 
 function formatTime(timestamp?: number) {
@@ -233,33 +276,38 @@ function formatTime(timestamp?: number) {
 
 onMounted(async () => {
   await loadJobs();
-  pollTimer = window.setInterval(() => {
-    loadJobs();
-  }, 3000);
+  connectWs();
+  pollTimer = window.setInterval(() => loadJobs(), 3000);
 });
 
 onBeforeUnmount(() => {
-  if (pollTimer) {
-    window.clearInterval(pollTimer);
-  }
+  disconnectWs();
+  if (pollTimer) window.clearInterval(pollTimer);
+  if (wsRefreshTimer) window.clearTimeout(wsRefreshTimer);
 });
 </script>
 
 <style scoped>
 .history-sync-page {
+  flex: 1;
+  width: 100%;
   height: 100%;
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   padding: var(--space-6);
   background: var(--bg-secondary);
 }
 
-.page-header {
+.page-header,
+.job-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
   gap: var(--space-4);
-  margin-bottom: var(--space-6);
+  align-items: flex-start;
 }
+
+.page-header { margin-bottom: var(--space-6); }
 
 .page-title {
   margin: 0;
@@ -284,9 +332,7 @@ onBeforeUnmount(() => {
   font-size: 18px;
 }
 
-.loading-state {
-  gap: var(--space-3);
-}
+.loading-state { gap: var(--space-3); }
 
 .loading-dot {
   width: 12px;
@@ -305,16 +351,9 @@ onBeforeUnmount(() => {
 .job-card {
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
-  border-radius: 16px;
-  padding: var(--space-5);
+  border-radius: 8px;
+  padding: var(--space-4);
   box-shadow: var(--shadow-sm);
-}
-
-.job-header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-4);
-  align-items: flex-start;
 }
 
 .job-title-row {
@@ -344,15 +383,15 @@ onBeforeUnmount(() => {
 }
 
 .progress-grid {
-  margin-top: var(--space-5);
+  margin-top: var(--space-4);
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
 }
 
 .progress-item {
-  padding: var(--space-4);
-  border-radius: 12px;
+  padding: var(--space-3);
+  border-radius: 8px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-secondary);
 }
@@ -360,24 +399,34 @@ onBeforeUnmount(() => {
 .progress-label {
   display: block;
   color: var(--text-secondary);
-  font-size: 13px;
-  margin-bottom: var(--space-2);
+  font-size: 12px;
+  margin-bottom: 4px;
 }
 
 .progress-value {
   color: var(--text-primary);
-  font-size: 24px;
+  font-size: 18px;
   font-weight: 700;
+  line-height: 1.25;
 }
 
-.folder-row,
-.time-row {
+.time-row,
+.clear-job-row {
   display: flex;
   gap: var(--space-5);
   flex-wrap: wrap;
   margin-top: var(--space-4);
   color: var(--text-secondary);
   font-size: 14px;
+}
+
+.clear-job-row {
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.14);
+  color: var(--text-primary);
 }
 
 .error-box {
@@ -428,41 +477,19 @@ onBeforeUnmount(() => {
 }
 
 @keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.85);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
 }
 
 @media (max-width: 1080px) {
-  .progress-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  .progress-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 720px) {
-  .history-sync-page {
-    padding: var(--space-4);
-  }
-
+  .history-sync-page { padding: var(--space-4); }
   .page-header,
-  .job-header {
-    flex-direction: column;
-  }
-
-  .job-actions {
-    width: 100%;
-    justify-content: flex-start;
-  }
-
-  .progress-grid {
-    grid-template-columns: 1fr;
-  }
+  .job-header { flex-direction: column; }
+  .job-actions { width: 100%; justify-content: flex-start; }
+  .progress-grid { grid-template-columns: 1fr; }
 }
 </style>

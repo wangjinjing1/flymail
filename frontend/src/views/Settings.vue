@@ -16,30 +16,6 @@
           </div>
         </div>
 
-        <div class="storage-fields">
-          <div class="field">
-            <label class="field-label">清理星期</label>
-            <div class="field-input">
-              <select v-model.number="form.uploads_cleanup_weekday" class="input">
-                <option v-for="day in cleanupWeekdays" :key="day.value" :value="day.value">
-                  {{ day.label }}
-                </option>
-              </select>
-            </div>
-          </div>
-
-          <div class="field">
-            <label class="field-label">清理时间</label>
-            <div class="field-input compact-input">
-              <input
-                v-model="form.uploads_cleanup_time"
-                class="input"
-                type="time"
-              />
-            </div>
-          </div>
-        </div>
-
         <div class="save-bar">
           <button class="btn btn-primary btn-save" @click="saveSettings" :disabled="saving">
             <svg v-if="!saving" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -652,8 +628,6 @@ function previewImage(src: string) {
 // ==================== 设置表单逻辑 ====================
 
 interface SettingsForm {
-  uploads_cleanup_weekday: number;
-  uploads_cleanup_time: string;
   gmail_client_id: string;
   gmail_client_secret: string;
   gmail_redirect_uri: string;
@@ -663,8 +637,6 @@ interface SettingsForm {
 }
 
 const form = ref<SettingsForm>({
-  uploads_cleanup_weekday: 0,
-  uploads_cleanup_time: '02:00',
   gmail_client_id: '',
   gmail_client_secret: '',
   gmail_redirect_uri: '',
@@ -672,16 +644,6 @@ const form = ref<SettingsForm>({
   outlook_client_secret: '',
   outlook_redirect_uri: '',
 });
-
-const cleanupWeekdays = [
-  { value: 0, label: '周一' },
-  { value: 1, label: '周二' },
-  { value: 2, label: '周三' },
-  { value: 3, label: '周四' },
-  { value: 4, label: '周五' },
-  { value: 5, label: '周六' },
-  { value: 6, label: '周日' },
-];
 
 const secretConfigured = ref(false);
 const outlookSecretConfigured = ref(false);
@@ -693,8 +655,6 @@ async function loadSettingsData() {
   try {
     const data = await api.get('/settings') as any;
     form.value = {
-      uploads_cleanup_weekday: Number(data.uploads_cleanup_weekday ?? 0),
-      uploads_cleanup_time: data.uploads_cleanup_time || '02:00',
       gmail_client_id: data.gmail_client_id || '',
       gmail_client_secret: '',
       gmail_redirect_uri: data.gmail_redirect_uri || '',
@@ -719,8 +679,6 @@ async function saveSettings() {
   saveError.value = '';
   try {
     const payload: Record<string, string | number> = {
-      uploads_cleanup_weekday: form.value.uploads_cleanup_weekday,
-      uploads_cleanup_time: form.value.uploads_cleanup_time || '02:00',
       gmail_client_id: form.value.gmail_client_id,
       gmail_redirect_uri: form.value.gmail_redirect_uri,
       outlook_client_id: form.value.outlook_client_id,
@@ -990,17 +948,6 @@ onMounted(() => {
   font-size: var(--text-sm);
   color: var(--text-tertiary);
   line-height: 1.5;
-}
-
-.storage-fields {
-  display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(160px, 220px);
-  gap: var(--space-5);
-  align-items: start;
-}
-
-.compact-input {
-  max-width: 180px;
 }
 
 /* 保存操作栏 */
@@ -1397,10 +1344,6 @@ onMounted(() => {
 
   .storage-card-body {
     padding: var(--space-4);
-  }
-
-  .storage-fields {
-    grid-template-columns: 1fr;
   }
 
   .save-bar {

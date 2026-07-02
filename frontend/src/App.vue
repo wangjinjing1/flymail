@@ -112,7 +112,7 @@ const navItems = computed(() => {
     { key: 'settings', label: '设置' },
   ];
   if (isAdmin.value) {
-    items.splice(4, 0, { key: 'users', label: '用户管理' });
+    items.splice(3, 0, { key: 'users', label: '用户管理' });
   }
   return items;
 });

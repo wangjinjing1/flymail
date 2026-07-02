@@ -65,7 +65,7 @@ function onLogoError(event: Event) {
   (event.target as HTMLImageElement).style.display = 'none';
 }
 
-const features = ['多邮箱', '实时同步', '自托管隐私', '历史同步', '断点续传', '多用户隔离'];
+const features = ['多邮箱', '实时同步', '自托管隐私', '同步管理', '断点续传', '多用户隔离'];
 const techs = ['Vue 3', 'TypeScript', 'FastAPI', 'MySQL', 'IMAP', 'WebSocket', 'Docker'];
 </script>
 

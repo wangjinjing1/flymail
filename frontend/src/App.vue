@@ -110,7 +110,7 @@ const navItems = computed(() => {
     { key: 'compose', label: '写邮件' },
     { key: 'mail', label: '邮件' },
     { key: 'accounts', label: '账号管理' },
-    { key: 'history-sync', label: '历史同步' },
+    { key: 'history-sync', label: '同步管理' },
     { key: 'settings', label: '设置' },
     { key: 'about', label: '关于' },
   ];

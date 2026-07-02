@@ -386,7 +386,7 @@
 - `unread_count`：最近一次从 IMAP 统计到的远端未读数。
 - `is_synced`：`total_count > 0 && cached_count >= total_count`。
 
-前端历史同步页的“已同步邮件”汇总使用 `sum(folder_progress.cached_count) / sum(folder_progress.total_count)`，与各文件夹子标签保持同一口径。
+前端同步管理页的“已同步邮件”汇总使用 `sum(folder_progress.cached_count) / sum(folder_progress.total_count)`，与各文件夹子标签保持同一口径。
 
 打开邮件详情时补全正文、附件或内嵌图片缓存，不会增加历史同步任务的“已同步邮件”数量；该数量只随新增摘要缓存增长。
 
@@ -428,7 +428,7 @@
 
 - `ping`
 - `new_mail`
-- `cache_updated`：缓存刷新完成。消息包含 `account_id`、`folder`，并尽量携带 `folder_counts`；前端用它刷新侧边栏、当前列表统计和历史同步页进度。
+- `cache_updated`：缓存刷新完成。消息包含 `account_id`、`folder`，并尽量携带 `folder_counts`；前端用它刷新侧边栏、当前列表统计和同步管理页进度。
 - `connection_status`
 - `sync_progress`
 - `message_state_changed`

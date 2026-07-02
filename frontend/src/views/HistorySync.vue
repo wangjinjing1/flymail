@@ -2,7 +2,7 @@
   <div class="history-sync-page">
     <div class="page-header">
       <div>
-        <h2 class="page-title">历史邮件同步</h2>
+        <h2 class="page-title">同步管理</h2>
         <p class="page-subtitle">查看每个邮箱的同步进度，支持暂停、继续、刷新、清空和失败重试。</p>
       </div>
       <button class="btn btn-secondary" :disabled="loading" @click="loadJobs(true)">刷新进度</button>

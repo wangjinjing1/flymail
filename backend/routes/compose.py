@@ -5,6 +5,7 @@
 - 发送邮件
 - 写邮件统一入口（发送/草稿/定时发送）
 """
+import asyncio
 import uuid
 from datetime import datetime
 
@@ -41,6 +42,33 @@ logger = get_logger("routes.compose")
 # ==================== 路由 ====================
 
 router = APIRouter(tags=["写信"])
+
+
+async def _cache_sent_message_after_send(
+    account: Account,
+    user_uid: str,
+    to: list[str],
+    cc: list[str],
+    bcc: list[str],
+    subject: str,
+    body_html: str,
+    attachments: list[str],
+    in_reply_to: str | None,
+) -> None:
+    try:
+        await ensure_sent_message_cached(
+            account=account,
+            user_uid=user_uid,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body_html=body_html,
+            attachments=attachments,
+            in_reply_to=in_reply_to,
+        )
+    except Exception as exc:
+        logger.warning("发送成功后缓存已发送邮件失败: %s", exc)
 
 
 
@@ -131,6 +159,7 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
     # ---- 保存草稿 ----
     if body.action == "draft":
         try:
+            drafts_folder = await find_special_folder(account, "drafts") or "Drafts"
             credentials = await _ensure_gmail_token(account)
             receiver = ProviderFactory.get_receiver(account.provider)
             await receiver.connect(credentials)
@@ -139,11 +168,11 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 ok = await save_draft_to_imap(
                     receiver, account.email, account.email,
                     body.to, body.cc, body.bcc, body.subject, body.body_html,
+                    folder=drafts_folder,
                 )
                 if ok:
                     # 草稿保存成功后，主动同步草稿箱缓存
                     try:
-                        drafts_folder = await find_special_folder(account, "drafts")
                         if drafts_folder:
                             await sync_folder_to_cache(account, drafts_folder)
                             await sync_service.refresh_clients(account.id, drafts_folder, user_uid=user_uid)
@@ -209,7 +238,7 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 logger.debug("断开发送连接失败: %s", e)
 
         if result.success:
-            sent_folder = await ensure_sent_message_cached(
+            asyncio.create_task(_cache_sent_message_after_send(
                 account=account,
                 user_uid=user_uid,
                 to=body.to,
@@ -219,8 +248,8 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 body_html=body.body_html,
                 attachments=body.attachments or [],
                 in_reply_to=body.in_reply_to,
-            )
-            return {"success": True, "message": "发送成功", "sent_folder": sent_folder or ""}
+            ))
+            return {"success": True, "message": "发送成功", "sent_folder": ""}
         else:
             raise AppError(500, result.error)
     except Exception as e:

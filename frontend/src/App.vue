@@ -39,17 +39,16 @@
       </header>
 
       <main class="content" :class="`content-${currentView}`">
-        <ComposeEmail v-if="currentView === 'compose'" @sent="handleComposeSent" @discard="currentView = 'mail'" />
+        <ComposeEmail v-if="currentView === 'compose'" @discard="currentView = 'mail'" />
         <template v-else-if="currentView === 'mail'">
           <KeepAlive>
             <MailList />
           </KeepAlive>
         </template>
-        <AccountList v-else-if="currentView === 'accounts'" />
         <HistorySync v-else-if="currentView === 'history-sync'" />
+        <AccountList v-else-if="currentView === 'accounts'" />
         <UserManagement v-else-if="currentView === 'users' && isAdmin" />
         <Settings v-else-if="currentView === 'settings'" />
-        <About v-else-if="currentView === 'about'" />
       </main>
     </div>
 
@@ -84,7 +83,6 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import About from './views/About.vue';
 import AccountList from './views/AccountList.vue';
 import ComposeEmail from './views/ComposeEmail.vue';
 import HistorySync from './views/HistorySync.vue';
@@ -109,10 +107,9 @@ const navItems = computed(() => {
   const items = [
     { key: 'compose', label: '写邮件' },
     { key: 'mail', label: '邮件' },
-    { key: 'accounts', label: '账号管理' },
     { key: 'history-sync', label: '同步管理' },
+    { key: 'accounts', label: '账号管理' },
     { key: 'settings', label: '设置' },
-    { key: 'about', label: '关于' },
   ];
   if (isAdmin.value) {
     items.splice(4, 0, { key: 'users', label: '用户管理' });
@@ -144,13 +141,6 @@ async function handleLoginSuccess() {
   authReady.value = true;
 }
 
-function handleComposeSent(payload?: { sentFolder?: string }) {
-  if (payload?.sentFolder) {
-    mailStore.setFolder(payload.sentFolder);
-  }
-  currentView.value = 'mail';
-}
-
 async function logout() {
   await api.post('/auth/logout');
   currentUser.value = null;
@@ -173,6 +163,14 @@ async function changePassword() {
 onMounted(checkAuth);
 
 watch(currentView, (value) => {
+  if (value === 'users' && !isAdmin.value) {
+    currentView.value = 'mail';
+    return;
+  }
+  if (!navItems.value.some((item) => item.key === value)) {
+    currentView.value = 'compose';
+    return;
+  }
   sessionStorage.setItem('flymail_view', value);
 });
 </script>
@@ -291,8 +289,7 @@ watch(currentView, (value) => {
 .content-accounts,
 .content-history-sync,
 .content-users,
-.content-settings,
-.content-about {
+.content-settings {
   padding: 0;
   width: 100%;
 }

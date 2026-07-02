@@ -1,5 +1,13 @@
 <template>
   <div class="settings-page">
+    <div class="settings-header">
+      <h2>设置</h2>
+      <button class="about-trigger" type="button" @click="showAbout = true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        关于
+      </button>
+    </div>
+
     <!-- Gmail 配置卡片（可折叠） -->
     <div class="provider-card">
       <!-- 折叠按钮 - 带红色渐变背景 -->
@@ -492,11 +500,19 @@
         </div>
       </div>
     </transition>
+
+    <div v-if="showAbout" class="about-modal-overlay" @click.self="showAbout = false">
+      <div class="about-modal">
+        <button class="about-close" type="button" title="关闭" @click="showAbout = false">×</button>
+        <About />
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+import About from './About.vue';
 import api from '../utils/api';
 
 // ==================== 教程数据 ====================
@@ -506,6 +522,7 @@ const previewSrc = ref('');
 const guideOpen = ref(false);
 const gmailOpen = ref(false);
 const outlookOpen = ref(false);
+const showAbout = ref(false);
 
 // 图片基础路径：Vite 构建时 base 为 /app/flymail/，需要拼接前缀才能正确访问
 const guideBase = import.meta.env.BASE_URL + 'guide/';
@@ -744,6 +761,79 @@ onMounted(() => {
   overflow-y: auto;
   padding: var(--space-6);
   background: var(--bg-secondary);
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.about-trigger {
+  height: 36px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.about-trigger:hover {
+  background: var(--bg-hover);
+}
+
+.about-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(15, 23, 42, 0.36);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.about-modal {
+  position: relative;
+  width: min(760px, 100%);
+  max-height: min(720px, calc(100vh - 40px));
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
+}
+
+.about-modal :deep(.about-page) {
+  height: min(720px, calc(100vh - 40px));
+}
+
+.about-close {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-secondary);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 /* 凭据配置卡片 */

@@ -99,17 +99,20 @@ async def _send_scheduled_email(
                 user_uid, account_id, account.provider, account.email, subject,
                 success=True
             )
-            await ensure_sent_message_cached(
-                account=account,
-                user_uid=user_uid,
-                to=to or [],
-                cc=cc or [],
-                bcc=bcc or [],
-                subject=subject or "",
-                body_html=body_html or "",
-                attachments=attachment_paths or [],
-                in_reply_to=in_reply_to,
-            )
+            try:
+                await ensure_sent_message_cached(
+                    account=account,
+                    user_uid=user_uid,
+                    to=to or [],
+                    cc=cc or [],
+                    bcc=bcc or [],
+                    subject=subject or "",
+                    body_html=body_html or "",
+                    attachments=attachment_paths or [],
+                    in_reply_to=in_reply_to,
+                )
+            except Exception as cache_err:
+                logger.warning("定时邮件发送成功后缓存已发送邮件失败: %s", cache_err)
         finally:
             await sender.disconnect()
     except Exception as e:

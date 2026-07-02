@@ -328,7 +328,6 @@ import { useMailStore } from '../stores/mail';
 import TiptapEditor from '../components/TiptapEditor.vue';
 
 const emit = defineEmits<{
-  sent: [payload?: { sentFolder?: string }];
   discard: [];
 }>();
 
@@ -692,6 +691,20 @@ function getErrorMessage(e: any) {
   return e?.error || e?.message || e?.response?.data?.error || '网络错误';
 }
 
+function clearComposeForm() {
+  toList.value = [];
+  ccList.value = [];
+  bccList.value = [];
+  toInput.value = '';
+  ccInput.value = '';
+  bccInput.value = '';
+  subject.value = '';
+  bodyHtml.value = '';
+  attachments.value = [];
+  showCc.value = false;
+  showBcc.value = false;
+}
+
 // 发送邮件
 async function sendMail() {
   commitRecipientInputs();
@@ -701,7 +714,7 @@ async function sendMail() {
   }
   sending.value = true;
   try {
-    const data = await api.post('/messages/compose', {
+    await api.post('/messages/compose', {
       account_id: fromAccountId.value,
       to: toList.value,
       cc: ccList.value,
@@ -712,7 +725,7 @@ async function sendMail() {
       action: 'send',
     }) as any;
     showToast('发送成功', 'success');
-    emit('sent', { sentFolder: data?.sent_folder || '' });
+    clearComposeForm();
   } catch (e: any) {
     showToast('发送失败: ' + getErrorMessage(e), 'error');
   } finally {

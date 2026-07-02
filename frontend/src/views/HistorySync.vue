@@ -5,10 +5,12 @@
         <h2 class="page-title">同步管理</h2>
         <p class="page-subtitle">查看每个邮箱的同步进度，支持暂停、继续、刷新、清空和失败重试。</p>
       </div>
-      <button class="btn btn-secondary" :disabled="loading" @click="loadJobs(true)">刷新进度</button>
+      <button class="btn btn-secondary" :disabled="manualRefreshing" @click="loadJobs({ showError: true, manual: true })">
+        {{ manualRefreshing ? '刷新中...' : '刷新进度' }}
+      </button>
     </div>
 
-    <div v-if="loading && jobs.length === 0" class="loading-state">
+    <div v-if="initialLoading && jobs.length === 0" class="loading-state">
       <div class="loading-dot"></div>
       <span>加载中...</span>
     </div>
@@ -114,7 +116,8 @@ interface HistorySyncItem {
 
 const ui = useUIStore();
 const jobs = ref<HistorySyncItem[]>([]);
-const loading = ref(false);
+const initialLoading = ref(false);
+const manualRefreshing = ref(false);
 let pollTimer: number | null = null;
 let wsRefreshTimer: number | null = null;
 
@@ -134,15 +137,18 @@ function handleWsMessage(data: any) {
   }
 }
 
-async function loadJobs(showError = false) {
-  loading.value = true;
+async function loadJobs(options: { showError?: boolean; manual?: boolean; initial?: boolean } = {}) {
+  if (options.manual && manualRefreshing.value) return;
+  if (options.initial) initialLoading.value = true;
+  if (options.manual) manualRefreshing.value = true;
   try {
     const data = await api.get('/history-sync/jobs') as any;
     jobs.value = data.jobs || [];
   } catch (e: any) {
-    if (showError) ui.error(e.message || '加载同步状态失败');
+    if (options.showError) ui.error(e.message || '加载同步状态失败');
   } finally {
-    loading.value = false;
+    if (options.initial) initialLoading.value = false;
+    if (options.manual) manualRefreshing.value = false;
   }
 }
 
@@ -229,6 +235,10 @@ function isClearActive(job?: HistorySyncJob | null) {
   return Boolean(job && (job.status === 'pending' || job.status === 'running'));
 }
 
+function hasActiveJobs() {
+  return jobs.value.some((item) => isFullSyncActive(item) || isClearActive(item.clear_job));
+}
+
 function canPause(status: string) {
   return status === 'pending' || status === 'running';
 }
@@ -275,9 +285,11 @@ function formatTime(timestamp?: number) {
 }
 
 onMounted(async () => {
-  await loadJobs();
+  await loadJobs({ initial: true, showError: true });
   connectWs();
-  pollTimer = window.setInterval(() => loadJobs(), 3000);
+  pollTimer = window.setInterval(() => {
+    if (hasActiveJobs()) loadJobs();
+  }, 3000);
 });
 
 onBeforeUnmount(() => {

@@ -5,14 +5,11 @@
         <h2>用户管理</h2>
         <p>管理员可创建普通用户、重置密码、启用或禁用账号。</p>
       </div>
-      <button class="btn btn-secondary" @click="loadUsers">刷新</button>
+      <div class="header-actions">
+        <button class="btn btn-primary" @click="openCreateModal">新增用户</button>
+        <button class="btn btn-secondary" @click="loadUsers">刷新</button>
+      </div>
     </div>
-
-    <form class="create-form" @submit.prevent="createUser">
-      <input v-model="form.username" placeholder="用户名" />
-      <input v-model="form.password" type="password" placeholder="初始密码" />
-      <button class="btn btn-primary">创建普通用户</button>
-    </form>
 
     <div class="filters">
       <input v-model="filters.keyword" placeholder="筛选用户名" />
@@ -59,6 +56,53 @@
         </tbody>
       </table>
     </div>
+
+    <div v-if="showCreateModal" class="modal-overlay" @click.self="closeCreateModal">
+      <form class="modal-card" @submit.prevent="createUser">
+        <div class="modal-header">
+          <h3>新增用户</h3>
+          <button class="icon-btn" type="button" title="关闭" @click="closeCreateModal">×</button>
+        </div>
+        <label class="field">
+          <span>用户名</span>
+          <input v-model.trim="form.username" placeholder="输入用户名" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span>初始密码</span>
+          <div class="password-field">
+            <input
+              v-model="form.password"
+              :type="showPassword ? 'text' : 'password'"
+              placeholder="输入初始密码"
+              autocomplete="new-password"
+            />
+            <button class="eye-btn" type="button" :title="showPassword ? '隐藏密码' : '显示密码'" @click="showPassword = !showPassword">
+              <svg v-if="showPassword" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.89 1 12a11.2 11.2 0 0 1 5.06-5.94"/><path d="M10.58 10.58A2 2 0 0 0 12 14a2 2 0 0 0 1.42-.58"/><path d="m3 3 18 18"/></svg>
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </label>
+        <label class="field">
+          <span>确认密码</span>
+          <div class="password-field">
+            <input
+              v-model="form.confirmPassword"
+              :type="showConfirmPassword ? 'text' : 'password'"
+              placeholder="再次输入密码"
+              autocomplete="new-password"
+            />
+            <button class="eye-btn" type="button" :title="showConfirmPassword ? '隐藏密码' : '显示密码'" @click="showConfirmPassword = !showConfirmPassword">
+              <svg v-if="showConfirmPassword" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.89 1 12a11.2 11.2 0 0 1 5.06-5.94"/><path d="M10.58 10.58A2 2 0 0 0 12 14a2 2 0 0 0 1.42-.58"/><path d="m3 3 18 18"/></svg>
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </label>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" type="button" @click="closeCreateModal">取消</button>
+          <button class="btn btn-primary" type="submit">创建普通用户</button>
+        </div>
+      </form>
+    </div>
   </div>
 </template>
 
@@ -70,12 +114,16 @@ const users = ref<any[]>([]);
 const form = reactive({
   username: '',
   password: '',
+  confirmPassword: '',
 });
 const filters = reactive({
   keyword: '',
   role: '',
   status: '',
 });
+const showCreateModal = ref(false);
+const showPassword = ref(false);
+const showConfirmPassword = ref(false);
 
 const filteredUsers = computed(() => {
   const keyword = filters.keyword.trim().toLowerCase();
@@ -93,14 +141,41 @@ async function loadUsers() {
 }
 
 async function createUser() {
+  if (!form.username.trim()) {
+    window.alert('请输入用户名');
+    return;
+  }
+  if (!form.password) {
+    window.alert('请输入初始密码');
+    return;
+  }
+  if (form.password !== form.confirmPassword) {
+    window.alert('两次输入的密码不一致');
+    return;
+  }
   try {
     await api.post('/admin/users', { username: form.username, password: form.password });
-    form.username = '';
-    form.password = '';
+    closeCreateModal();
     await loadUsers();
   } catch (e: any) {
     window.alert(e?.error || e?.message || '创建用户失败');
   }
+}
+
+function openCreateModal() {
+  form.username = '';
+  form.password = '';
+  form.confirmPassword = '';
+  showPassword.value = false;
+  showConfirmPassword.value = false;
+  showCreateModal.value = true;
+}
+
+function closeCreateModal() {
+  showCreateModal.value = false;
+  form.username = '';
+  form.password = '';
+  form.confirmPassword = '';
 }
 
 async function promptReset(userId: string) {
@@ -175,22 +250,21 @@ onMounted(loadUsers);
   color: #64748b;
 }
 
-.create-form,
 .filters {
   display: grid;
   gap: 12px;
   margin-bottom: 20px;
 }
 
-.create-form {
-  grid-template-columns: 1.2fr 1fr 140px;
+.header-actions {
+  display: flex;
+  gap: 10px;
 }
 
 .filters {
   grid-template-columns: 1.2fr 180px 180px;
 }
 
-.create-form input,
 .filters input,
 .filters select {
   height: 40px;
@@ -198,6 +272,105 @@ onMounted(loadUsers);
   border-radius: 10px;
   padding: 0 12px;
   min-width: 0;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(15, 23, 42, 0.36);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.modal-card {
+  width: min(100%, 420px);
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
+}
+
+.modal-header,
+.modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-header {
+  margin-bottom: 16px;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 6px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.field input,
+.password-field input {
+  width: 100%;
+  height: 40px;
+  border: 1px solid #dbe2ea;
+  border-radius: 8px;
+  padding: 0 12px;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 42px;
+}
+
+.eye-btn,
+.icon-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: #64748b;
+}
+
+.eye-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  font-size: 22px;
+  line-height: 1;
 }
 
 .user-table-wrap {
@@ -264,7 +437,6 @@ onMounted(loadUsers);
     gap: 12px;
   }
 
-  .create-form,
   .filters {
     grid-template-columns: 1fr;
   }

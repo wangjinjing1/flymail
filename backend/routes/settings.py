@@ -4,13 +4,11 @@
 以及 OAuth 配置诊断接口。
 """
 import os
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from deps import get_uid
 from db import (
     get_accounts,
-    get_cached_attachment_rows,
     get_cached_count,
     get_folder_stats,
     get_history_sync_job,
@@ -135,25 +133,6 @@ def _visible_history_job(job: dict | None, folder_progress: list[dict]) -> dict 
                 "downloaded_inline_images": 0,
             }
         )
-    return visible
-
-
-async def _with_local_attachment_counts(account_id: str, job: dict | None) -> dict | None:
-    if not job:
-        return None
-    visible = dict(job)
-    attachments = 0
-    inline_images = 0
-    for item in await get_cached_attachment_rows(account_id):
-        local_path = item.get("local_path") or ""
-        if not local_path or not Path(local_path).exists():
-            continue
-        if item.get("is_inline"):
-            inline_images += 1
-        else:
-            attachments += 1
-    visible["downloaded_attachments"] = attachments
-    visible["downloaded_inline_images"] = inline_images
     return visible
 
 
@@ -307,10 +286,7 @@ async def get_history_sync_jobs(request: Request):
     items = []
     for account in accounts:
         folder_progress = await _build_folder_progress(account.id)
-        history_job = await _with_local_attachment_counts(
-            account.id,
-            _visible_history_job(history_by_account.get(account.id), folder_progress),
-        )
+        history_job = _visible_history_job(history_by_account.get(account.id), folder_progress)
         clear_job = clear_by_account.get(account.id)
         items.append(
             {
@@ -334,10 +310,7 @@ async def get_history_sync_job_detail(account_id: str, request: Request):
     if not account:
         return {"job": None, "clear_job": None}
     folder_progress = await _build_folder_progress(account.id)
-    job = await _with_local_attachment_counts(
-        account.id,
-        _visible_history_job(await get_history_sync_job(account_id, job_type="history_sync"), folder_progress),
-    )
+    job = _visible_history_job(await get_history_sync_job(account_id, job_type="history_sync"), folder_progress)
     clear_job = await get_history_sync_job(account_id, job_type="clear_cache")
     return {
         "job": job,
@@ -359,10 +332,7 @@ async def refresh_history_sync_job_status(account_id: str, request: Request):
     if not account:
         return {"success": False, "message": "account_not_found"}
     folder_progress = await _build_folder_progress(account.id)
-    job = await _with_local_attachment_counts(
-        account.id,
-        _visible_history_job(await refresh_history_sync_job(account_id), folder_progress),
-    )
+    job = _visible_history_job(await refresh_history_sync_job(account_id), folder_progress)
     clear_job = await get_history_sync_job(account_id, job_type="clear_cache")
     return {
         "success": True,

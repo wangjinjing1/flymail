@@ -48,8 +48,8 @@
 - `cached_count` 来自本地 `cached_messages`。
 - 历史同步页顶部“已同步邮件”不使用单个任务的累计拉取数，而是使用各文件夹 `cached_count` 与 `total_count` 汇总，避免和子文件夹标签口径不一致。
 - 邮件列表页在线加载时优先使用本地缓存；当缓存不足或远端统计未知时，会刷新当前文件夹的 IMAP 总数和未读数。历史同步页后续刷新会复用这些最新统计。
-- 普通后台新邮件缓存不再累加历史同步任务的 `downloaded_attachments` 和 `downloaded_inline_images`，避免历史同步附件指标被日常收信流程改变。
-- 普通后台新邮件缓存完成后会推送 `cache_updated`，历史同步页收到后即时刷新各文件夹 `cached_count / total_count`。
+- 历史同步页展示收件箱、已发送、草稿箱、垃圾邮箱、已删除的 `cached_count / total_count`，不再展示附件和内嵌图片下载数量。
+- 普通后台新邮件缓存完成或邮件列表手动刷新后会推送 `cache_updated`，历史同步页收到后即时刷新各文件夹 `cached_count / total_count`。
 
 ## 约束
 

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import uuid
@@ -68,6 +69,7 @@ ensure_data_dirs()
 
 _REMOTE_PAGE_REFRESHING: set[tuple[str, str, int, int]] = set()
 ZERO_COUNT_RECHECK_SECONDS = 300
+REMOTE_PAGE_FETCH_TIMEOUT_SECONDS = 45
 
 
 def _extract_uid(message_id: str) -> str:
@@ -301,10 +303,23 @@ async def _fetch_remote_page_to_cache(
             finally:
                 await _safe_disconnect(receiver)
 
-        result, remote_folder = await _with_outlook_retry(account, _fetch_remote)
+        result, remote_folder = await asyncio.wait_for(
+            _with_outlook_retry(account, _fetch_remote),
+            timeout=REMOTE_PAGE_FETCH_TIMEOUT_SECONDS,
+        )
         await _cache_remote_page(account, remote_folder, result)
         await sync_service.refresh_clients(account.id, folder, user_uid=user_uid)
         return result, ""
+    except TimeoutError:
+        message = "远端邮箱响应超时，请稍后重试"
+        logger.warning(
+            "fetch remote page timeout: account=%s folder=%s page=%s timeout=%ss",
+            account.email,
+            folder,
+            page,
+            REMOTE_PAGE_FETCH_TIMEOUT_SECONDS,
+        )
+        return None, message
     except Exception as exc:
         logger.warning("fetch remote page failed: account=%s folder=%s page=%s error=%s", account.email, folder, page, exc)
         await _notify_if_permanent_token_error(exc, account, user_uid)

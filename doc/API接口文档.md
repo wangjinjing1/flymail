@@ -388,6 +388,8 @@
 
 前端同步管理页的“已同步邮件”汇总使用 `sum(folder_progress.cached_count) / sum(folder_progress.total_count)`，与各文件夹子标签保持同一口径。
 
+前端同步管理页同时展示收件箱、已发送、草稿箱、垃圾邮箱、已删除的 `cached_count / total_count`。邮件列表手动刷新或后台缓存完成后，后端会推送 `cache_updated` 和 `folder_counts`，同步管理页据此刷新这些进度。
+
 打开邮件详情时补全正文、附件或内嵌图片缓存，不会增加历史同步任务的“已同步邮件”数量；该数量只随新增摘要缓存增长。
 
 ### `GET /api/history-sync/jobs/{account_id}`

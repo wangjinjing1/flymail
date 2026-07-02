@@ -236,6 +236,33 @@ class MessageFolderResolutionTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_remote_page_fetch_returns_error_on_timeout(self):
+        messages = _load_messages_route_module()
+
+        async def slow_operation(_account, _operation):
+            await messages.asyncio.sleep(1)
+
+        account = types.SimpleNamespace(
+            id="account-1",
+            email="user@example.com",
+            provider="gmail",
+            status="online",
+        )
+        messages.REMOTE_PAGE_FETCH_TIMEOUT_SECONDS = 0.01
+        messages._with_outlook_retry = slow_operation
+        messages.sync_service = types.SimpleNamespace(is_account_suspended=lambda _account_id: False)
+
+        result, error = await messages._fetch_remote_page_to_cache(
+            user_uid="user-1",
+            account=account,
+            folder="Sent",
+            page=1,
+            page_size=50,
+        )
+
+        self.assertIsNone(result)
+        self.assertIn("超时", error)
+
 
 if __name__ == "__main__":
     unittest.main()

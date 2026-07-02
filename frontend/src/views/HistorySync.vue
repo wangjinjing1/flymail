@@ -43,17 +43,17 @@
         </div>
 
         <div class="progress-grid">
-          <div class="progress-item">
+          <div class="progress-item progress-summary">
             <span class="progress-label">已同步邮件</span>
             <span class="progress-value">{{ syncedMessageCount(item) }} / {{ totalMessageCount(item) }}</span>
           </div>
-          <div class="progress-item">
-            <span class="progress-label">已下载附件</span>
-            <span class="progress-value">{{ item.job?.downloaded_attachments || 0 }}</span>
-          </div>
-          <div class="progress-item">
-            <span class="progress-label">内嵌图片</span>
-            <span class="progress-value">{{ item.job?.downloaded_inline_images || 0 }}</span>
+          <div
+            v-for="folder in folderProgress(item)"
+            :key="folder.folder"
+            class="progress-item"
+          >
+            <span class="progress-label">{{ folder.label }}</span>
+            <span class="progress-value">{{ folder.cached_count || 0 }} / {{ folder.total_count || 0 }}</span>
           </div>
         </div>
 
@@ -406,6 +406,11 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-secondary);
+}
+
+.progress-summary {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.18);
 }
 
 .progress-label {

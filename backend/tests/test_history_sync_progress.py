@@ -131,6 +131,35 @@ class HistorySyncProgressTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inbox["summary_count"], 7)
         self.assertFalse(inbox["is_synced"])
 
+    async def test_folder_progress_total_is_not_less_than_cached_count(self):
+        settings = _load_settings_route_module()
+
+        async def fake_get_folder_stats(account_id, folder_key):
+            return {"total_count": 0, "unread_count": 0, "updated_at": 1}
+
+        async def fake_get_cached_count(account_id, folder_key):
+            return 1 if folder_key == "Sent" else 0
+
+        async def fake_get_history_sync_job(account_id, job_type="history_sync"):
+            return None
+
+        with (
+            patch.object(
+                settings,
+                "list_account_folder_counts",
+                AsyncMock(return_value=[{"folder_key": "sent", "cached_count": 1}]),
+            ),
+            patch.object(settings, "get_folder_stats", fake_get_folder_stats),
+            patch.object(settings, "get_cached_count", fake_get_cached_count),
+            patch.object(settings, "get_history_sync_job", fake_get_history_sync_job),
+        ):
+            progress = await settings._build_folder_progress("account-1")
+
+        sent = next(item for item in progress if item["folder"] == "Sent")
+        self.assertEqual(sent["cached_count"], 1)
+        self.assertEqual(sent["total_count"], 1)
+        self.assertTrue(sent["is_synced"])
+
 
 if __name__ == "__main__":
     unittest.main()

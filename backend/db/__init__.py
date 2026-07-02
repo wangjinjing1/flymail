@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import os
 import json
@@ -727,8 +728,35 @@ CORE_FOLDER_DEFINITIONS = [
 ]
 
 
+def _decode_imap_modified_utf7_path(folder: str) -> str:
+    text = (folder or "").strip()
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] != "&":
+            result.append(text[i])
+            i += 1
+            continue
+        end = text.find("-", i)
+        if end < 0:
+            result.append(text[i:])
+            break
+        if end == i + 1:
+            result.append("&")
+        else:
+            encoded = text[i + 1:end].replace(",", "/")
+            padding = (4 - len(encoded) % 4) % 4
+            try:
+                result.append(base64.b64decode(encoded + ("=" * padding)).decode("utf-16-be"))
+            except Exception:
+                result.append(text[i:end + 1])
+        i = end + 1
+    return "".join(result)
+
+
 def folder_key_for_path(folder: str) -> str:
     folder_lower = (folder or "").strip().lower()
+    decoded_leaf = _decode_imap_modified_utf7_path(folder).lower().rsplit("/", 1)[-1]
     extra_aliases = {
         "sent": {"sent mail", "[google mail]/sent mail", "已发送"},
         "drafts": {"[google mail]/drafts", "草稿箱"},
@@ -737,6 +765,15 @@ def folder_key_for_path(folder: str) -> str:
     }
     for key, aliases in extra_aliases.items():
         if folder_lower in aliases:
+            return key
+    decoded_aliases = {
+        "sent": {"\u5df2\u53d1\u9001", "\u5df2\u53d1\u90ae\u4ef6"},
+        "drafts": {"\u8349\u7a3f\u7bb1"},
+        "junk": {"\u5783\u573e\u90ae\u4ef6"},
+        "trash": {"\u5df2\u5220\u9664"},
+    }
+    for key, aliases in decoded_aliases.items():
+        if decoded_leaf in aliases:
             return key
     for key, _default_path, _display_name, aliases in CORE_FOLDER_DEFINITIONS:
         if any(folder_lower == alias.lower() for alias in aliases):
@@ -1153,17 +1190,17 @@ def _row_to_dict(cursor, row):
 
 def _expand_folder_aliases(folder: str) -> list[str]:
     folder = (folder or '').strip() or 'INBOX'
-    alias_groups = [
-        {'INBOX', 'Inbox'},
-        {'Sent', 'Sent Mail', 'Sent Messages', 'Sent Items', '[Gmail]/Sent Mail', '[Google Mail]/Sent Mail', '已发送'},
-        {'Drafts', '[Gmail]/Drafts', '[Google Mail]/Drafts', '草稿箱'},
-        {'Junk', 'Junk Email', 'Spam', '[Gmail]/Spam', '[Google Mail]/Spam', '垃圾邮件'},
-        {'Trash', 'Deleted', 'Deleted Items', 'Deleted Messages', '[Gmail]/Trash', '[Google Mail]/Trash', '已删除'},
-    ]
-    folder_lower = folder.lower()
-    for group in alias_groups:
-        if any(folder_lower == item.lower() for item in group):
-            return sorted(group)
+    extra_aliases = {
+        "inbox": {"INBOX", "Inbox"},
+        "sent": {"&XfJT0ZAB-", "[Gmail]/&XfJT0ZCuTvY-"},
+        "drafts": {"&g0l6P3ux-", "[Gmail]/&g0l6Pw-"},
+        "junk": {"[Gmail]/&V4NXPpCuTvY-"},
+        "trash": {"[Gmail]/&XfJSIJZk-", "[Gmail]/&XfJSIJZkkK5O9g-"},
+    }
+    folder_key = folder_key_for_path(folder)
+    for key, default_path, _display_name, aliases in CORE_FOLDER_DEFINITIONS:
+        if folder_key == key:
+            return sorted({default_path, *aliases, *extra_aliases.get(key, set())})
     return [folder]
 
 

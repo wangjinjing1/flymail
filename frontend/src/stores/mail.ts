@@ -24,6 +24,11 @@ interface MailNotification {
 
 type FolderCount = { unread_count: number; total_count: number };
 type AccountFolderCounts = Record<string, FolderCount>;
+type FolderPaths = Record<string, string>;
+
+const DEFAULT_FOLDER_PATHS: FolderPaths = Object.fromEntries(
+  CORE_FOLDERS.map((folder) => [folder.name, folder.defaultPath]),
+);
 
 export const useMailStore = defineStore('mail', () => {
   const uiStore = useUIStore();
@@ -39,13 +44,10 @@ export const useMailStore = defineStore('mail', () => {
   const folderCounts = ref<AccountFolderCounts>(
     JSON.parse(sessionStorage.getItem('flymail_folder_counts') || '{}'),
   );
-  const folderPaths = ref<Record<string, string>>({
-    '收件箱': 'INBOX',
-    '已发送': 'Sent Messages',
-    '草稿箱': 'Drafts',
-    '垃圾邮件': 'Junk',
-    '已删除': 'Trash',
-  });
+  const folderPathsByAccount = ref<Record<string, FolderPaths>>(
+    JSON.parse(sessionStorage.getItem('flymail_folder_paths_by_account') || '{}'),
+  );
+  const folderPaths = ref<FolderPaths>({ ...DEFAULT_FOLDER_PATHS });
   const notifications = ref<MailNotification[]>([]);
   const composeDraft = ref<any>(null);
   let folderCountRequestVersion = 0;
@@ -119,6 +121,17 @@ export const useMailStore = defineStore('mail', () => {
     sessionStorage.setItem('flymail_folder_counts', JSON.stringify(folderCounts.value));
   }
 
+  function setCurrentFolderPaths(nextPaths: FolderPaths) {
+    folderPaths.value = { ...DEFAULT_FOLDER_PATHS, ...nextPaths };
+    if (currentAccountId.value) {
+      folderPathsByAccount.value = {
+        ...folderPathsByAccount.value,
+        [currentAccountId.value]: folderPaths.value,
+      };
+      sessionStorage.setItem('flymail_folder_paths_by_account', JSON.stringify(folderPathsByAccount.value));
+    }
+  }
+
   async function fetchUser() {
     loading.value = true;
     try {
@@ -145,6 +158,7 @@ export const useMailStore = defineStore('mail', () => {
         currentAccountId.value = '';
         folderCountRequestVersion++;
         folderCounts.value = {};
+        folderPaths.value = { ...DEFAULT_FOLDER_PATHS };
         sessionStorage.removeItem('flymail_folder_counts');
         return;
       }
@@ -154,6 +168,7 @@ export const useMailStore = defineStore('mail', () => {
         currentFolder.value = 'INBOX';
         folderCountRequestVersion++;
         folderCounts.value = folderCountsByAccount.value[currentAccountId.value] || {};
+        folderPaths.value = { ...DEFAULT_FOLDER_PATHS, ...(folderPathsByAccount.value[currentAccountId.value] || {}) };
       }
     } catch (e) {
       console.error('加载账号失败:', e);
@@ -165,6 +180,7 @@ export const useMailStore = defineStore('mail', () => {
     if (accounts.value.length === 0 || !currentAccountId.value) {
       folderCountRequestVersion++;
       folderCounts.value = {};
+      folderPaths.value = { ...DEFAULT_FOLDER_PATHS };
       sessionStorage.removeItem('flymail_folder_counts');
       return;
     }
@@ -180,7 +196,7 @@ export const useMailStore = defineStore('mail', () => {
       for (const folder of (data.folders || [])) {
         nextPaths[folder.name] = folder.path;
       }
-      folderPaths.value = { ...folderPaths.value, ...nextPaths };
+      setCurrentFolderPaths(nextPaths);
       loadFolderCounts();
     } catch (e) {
       console.error('加载文件夹失败:', e);
@@ -192,6 +208,7 @@ export const useMailStore = defineStore('mail', () => {
     if (accounts.value.length === 0 || !currentAccountId.value) {
       folderCountRequestVersion++;
       folderCounts.value = {};
+      folderPaths.value = { ...DEFAULT_FOLDER_PATHS };
       sessionStorage.removeItem('flymail_folder_counts');
       return;
     }
@@ -228,6 +245,7 @@ export const useMailStore = defineStore('mail', () => {
     currentFolder.value = 'INBOX';
     folderCountRequestVersion++;
     folderCounts.value = folderCountsByAccount.value[id] || {};
+    folderPaths.value = { ...DEFAULT_FOLDER_PATHS, ...(folderPathsByAccount.value[id] || {}) };
   }
 
   function updateFolderCounts(counts: Record<string, any>) {
@@ -261,6 +279,7 @@ export const useMailStore = defineStore('mail', () => {
     currentFolder.value = 'INBOX';
     folderCountRequestVersion++;
     folderCounts.value = {};
+    folderPaths.value = { ...DEFAULT_FOLDER_PATHS };
     sessionStorage.removeItem('flymail_folder');
     sessionStorage.removeItem('flymail_folder_counts');
   }

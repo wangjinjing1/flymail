@@ -204,6 +204,20 @@ class MessageFolderResolutionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resolved, "[Gmail]/Sent Mail")
 
+    async def test_resolves_gmail_localized_sent_folder_by_modified_utf7_path(self):
+        messages = _load_messages_route_module()
+
+        class Receiver:
+            async def fetch_folders(self):
+                return [
+                    Folder(name="收件箱", path="INBOX"),
+                    Folder(name="已发送", path="[Gmail]/&XfJT0ZCuTvY-"),
+                ]
+
+        resolved = await messages._resolve_remote_folder(Receiver(), "Sent")
+
+        self.assertEqual(resolved, "[Gmail]/&XfJT0ZCuTvY-")
+
     async def test_sent_zero_stats_are_rechecked_after_ttl(self):
         messages = _load_messages_route_module()
 

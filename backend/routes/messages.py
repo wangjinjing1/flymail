@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import time
 import uuid
@@ -105,10 +106,46 @@ REMOTE_FOLDER_ALIAS_ORDER = {
 
 def _remote_folder_alias_key(folder: str) -> str:
     folder_lower = (folder or "INBOX").strip().lower()
+    decoded_leaf = _decode_imap_modified_utf7_path(folder).lower().rsplit("/", 1)[-1]
     for key, aliases in REMOTE_FOLDER_ALIAS_ORDER.items():
         if any(folder_lower == alias.lower() for alias in aliases):
             return key
+    decoded_aliases = {
+        "sent": {"\u5df2\u53d1\u9001", "\u5df2\u53d1\u90ae\u4ef6"},
+        "drafts": {"\u8349\u7a3f\u7bb1"},
+        "junk": {"\u5783\u573e\u90ae\u4ef6"},
+        "trash": {"\u5df2\u5220\u9664"},
+    }
+    for key, aliases in decoded_aliases.items():
+        if decoded_leaf in aliases:
+            return key
     return ""
+
+
+def _decode_imap_modified_utf7_path(folder: str) -> str:
+    text = (folder or "").strip()
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] != "&":
+            result.append(text[i])
+            i += 1
+            continue
+        end = text.find("-", i)
+        if end < 0:
+            result.append(text[i:])
+            break
+        if end == i + 1:
+            result.append("&")
+        else:
+            encoded = text[i + 1:end].replace(",", "/")
+            padding = (4 - len(encoded) % 4) % 4
+            try:
+                result.append(base64.b64decode(encoded + ("=" * padding)).decode("utf-16-be"))
+            except Exception:
+                result.append(text[i:end + 1])
+        i = end + 1
+    return "".join(result)
 
 
 async def _get_effective_folder_stats(account_id: str, folder: str) -> dict:

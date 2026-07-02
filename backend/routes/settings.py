@@ -97,7 +97,7 @@ async def _build_folder_progress(account_id: str) -> list[dict]:
             synced_count = cached_count
         sync_job = await get_history_sync_job(account_id, job_type=f"folder_sync:{folder_key}")
         clear_job = await get_history_sync_job(account_id, job_type=f"folder_clear:{folder_key}")
-        total_count = int(folder_stats.get("total_count", 0) or 0)
+        total_count = max(int(folder_stats.get("total_count", 0) or 0), synced_count, cached_count)
         unread_count = int(folder_stats.get("unread_count", 0) or 0)
         if folder_key == "Sent":
             unread_count = 0

@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import base64
 import time
 from typing import Dict, List
 
@@ -67,6 +68,86 @@ def _select_uncached_recent_messages(messages: List[Message], cached_uids: set[i
     return selected, False
 
 
+REMOTE_FOLDER_ALIAS_ORDER = {
+    "inbox": ["INBOX", "Inbox"],
+    "sent": ["Sent Messages", "Sent Items", "[Gmail]/Sent Mail", "[Google Mail]/Sent Mail", "Sent", "Sent Mail", "已发送"],
+    "drafts": ["Drafts", "[Gmail]/Drafts", "[Google Mail]/Drafts", "草稿箱"],
+    "junk": ["Junk", "Junk Email", "Spam", "[Gmail]/Spam", "[Google Mail]/Spam", "垃圾邮件"],
+    "trash": ["Deleted Messages", "Deleted Items", "[Gmail]/Trash", "[Google Mail]/Trash", "Trash", "Deleted", "已删除"],
+}
+
+
+def _remote_folder_alias_key(folder: str) -> str:
+    folder_lower = (folder or "INBOX").strip().lower()
+    decoded_leaf = _decode_imap_modified_utf7_path(folder).lower().rsplit("/", 1)[-1]
+    for key, aliases in REMOTE_FOLDER_ALIAS_ORDER.items():
+        if any(folder_lower == alias.lower() for alias in aliases):
+            return key
+    decoded_aliases = {
+        "sent": {"\u5df2\u53d1\u9001", "\u5df2\u53d1\u90ae\u4ef6"},
+        "drafts": {"\u8349\u7a3f\u7bb1"},
+        "junk": {"\u5783\u573e\u90ae\u4ef6"},
+        "trash": {"\u5df2\u5220\u9664"},
+    }
+    for key, aliases in decoded_aliases.items():
+        if decoded_leaf in aliases:
+            return key
+    return ""
+
+
+def _decode_imap_modified_utf7_path(folder: str) -> str:
+    text = (folder or "").strip()
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] != "&":
+            result.append(text[i])
+            i += 1
+            continue
+        end = text.find("-", i)
+        if end < 0:
+            result.append(text[i:])
+            break
+        if end == i + 1:
+            result.append("&")
+        else:
+            encoded = text[i + 1:end].replace(",", "/")
+            padding = (4 - len(encoded) % 4) % 4
+            try:
+                result.append(base64.b64decode(encoded + ("=" * padding)).decode("utf-16-be"))
+            except Exception:
+                result.append(text[i:end + 1])
+        i = end + 1
+    return "".join(result)
+
+
+async def _resolve_remote_folder(receiver, folder: str) -> str:
+    requested = (folder or "INBOX").strip() or "INBOX"
+    alias_key = _remote_folder_alias_key(requested)
+    if not alias_key:
+        return requested
+
+    try:
+        folders = await receiver.fetch_folders()
+    except Exception as exc:
+        logger.debug("resolve cache sync folder failed: folder=%s error=%s", requested, exc)
+        return requested
+
+    for item in folders:
+        item_path = getattr(item, "path", "") or ""
+        item_name = getattr(item, "name", "") or ""
+        if _remote_folder_alias_key(item_path) == alias_key or _remote_folder_alias_key(item_name) == alias_key:
+            return item_path
+    for alias in REMOTE_FOLDER_ALIAS_ORDER[alias_key]:
+        alias_lower = alias.lower()
+        for item in folders:
+            item_path = getattr(item, "path", "") or ""
+            item_name = getattr(item, "name", "") or ""
+            if item_path.lower() == alias_lower or item_name.lower() == alias_lower:
+                return item_path
+    return requested
+
+
 async def sync_recent_folder_to_cache(account: Account, folder: str = "INBOX", page_size: int = 50) -> int:
     """Fetch recent remote pages and cache only messages not already saved locally."""
     lock = await try_acquire_sync_lock(account.id)
@@ -80,6 +161,7 @@ async def sync_recent_folder_to_cache(account: Account, folder: str = "INBOX", p
         receiver = ProviderFactory.get_receiver(account.provider)
         await receiver.connect(credentials)
 
+        folder = await _resolve_remote_folder(receiver, folder)
         cached_uids = await get_cached_uids(account.id, folder)
         unseen_uids = None
         try:
@@ -165,6 +247,7 @@ async def _do_sync(receiver, account: Account, folder: str, force_full: bool = F
 
     force_full: 强制全量同步（rebuild-sync 时使用，避免并发写入导致增量同步遗漏）
     """
+    folder = await _resolve_remote_folder(receiver, folder)
     max_uid = await get_max_cached_uid(account.user_uid, account.id, folder)
     folder_stats = await get_folder_stats(account.id, folder)
 
@@ -433,6 +516,7 @@ async def sync_missing_messages(account: Account, folder: str) -> int:
             credentials = await ensure_token(account)
             receiver = ProviderFactory.get_receiver(account.provider)
             await receiver.connect(credentials)
+            folder = await _resolve_remote_folder(receiver, folder)
 
             # 1. 获取 IMAP 全量 UID 列表
             try:

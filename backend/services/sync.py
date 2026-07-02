@@ -263,6 +263,8 @@ class MailSyncService:
             # 启动时获取所有用户的账号（空字符串表示查所有用户）
             all_accounts = await get_accounts("")
             for account in all_accounts:
+                if account.status == "offline":
+                    continue
                 if account.id not in self.idle_tasks:
                     task = asyncio.create_task(self._idle_loop(account))
                     self.idle_tasks[account.id] = task
@@ -361,6 +363,8 @@ class MailSyncService:
             all_accounts = await get_accounts("")
             for account in all_accounts:
                 if account.id == account_id:
+                    if account.status == "offline":
+                        return
                     task = asyncio.create_task(self._idle_loop(account))
                     self.idle_tasks[account.id] = task
                     break
@@ -477,6 +481,9 @@ class MailSyncService:
             try:
                 fresh_accounts = await get_accounts(account.user_uid)
                 account = next((a for a in fresh_accounts if a.id == account.id), account)
+                if account.status == "offline":
+                    await self.notify_connection_status(account.id, "disconnected", account.user_uid)
+                    break
 
                 from services.token import ensure_token
                 credentials = await ensure_token(account)

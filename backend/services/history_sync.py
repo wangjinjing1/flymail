@@ -19,8 +19,10 @@ from db import (
     batch_update_is_read,
     create_history_sync_job,
     batch_delete_cached_messages,
+    delete_account,
     get_cached_attachment,
-    get_cached_body_count,
+    get_cached_attachment_rows,
+    get_cached_count,
     get_cached_message_detail,
     get_account_by_id,
     get_cached_uids,
@@ -33,6 +35,7 @@ from db import (
     delete_cached_attachments_by_account,
     delete_cached_messages_by_account,
     delete_folder_stats_by_account,
+    delete_history_sync_jobs_by_account,
     upsert_folder_stats,
 )
 from models import CachedAttachment, CachedMessage
@@ -299,14 +302,22 @@ async def retry_history_sync(account_id: str) -> bool:
     return True
 
 
-def _count_local_cache_files(account_id: str, account_email: str) -> int:
+async def _account_local_cache_files(account_id: str, account_email: str) -> list[Path]:
+    files: dict[str, Path] = {}
     slug = account_email or account_id
-    total = 0
     for root in (DOCUMENTS_DIR, PICTURES_DIR):
         account_root = root / slug
         if account_root.exists():
-            total += sum(1 for path in account_root.rglob("*") if path.is_file())
-    return total
+            for path in account_root.rglob("*"):
+                if path.is_file():
+                    files[str(path)] = path
+    for item in await get_cached_attachment_rows(account_id):
+        local_path = item.get("local_path") or ""
+        if local_path:
+            path = Path(local_path)
+            if path.exists() and path.is_file():
+                files[str(path)] = path
+    return list(files.values())
 
 
 async def start_clear_cache(account_id: str) -> bool:
@@ -314,6 +325,14 @@ async def start_clear_cache(account_id: str) -> bool:
     if existing and existing.get("status") in {"pending", "running"}:
         return False
     create_background_task(run_clear_cache(account_id), name="clear_mail_cache")
+    return True
+
+
+async def start_delete_account(account_id: str) -> bool:
+    existing = await get_history_sync_job(account_id, job_type="account_delete")
+    if existing and existing.get("status") in {"pending", "running"}:
+        return False
+    create_background_task(run_delete_account(account_id), name="delete_mail_account")
     return True
 
 
@@ -330,7 +349,8 @@ async def run_clear_cache(account_id: str) -> None:
     ensure_data_dirs()
     job_id = uuid.uuid4().hex
     total_messages = 0
-    total_files = _count_local_cache_files(account.id, account.email)
+    file_paths = await _account_local_cache_files(account.id, account.email)
+    total_files = len(file_paths)
     job = {
         "id": job_id,
         "account_id": account.id,
@@ -408,6 +428,81 @@ async def run_clear_cache(account_id: str) -> None:
             )
     except Exception as exc:
         logger.warning("clear cache failed for %s: %s", account.email, exc)
+        await update_history_sync_job(
+            job_id,
+            status="failed",
+            error_message=str(exc),
+            finished_at=time.time(),
+        )
+
+
+async def run_delete_account(account_id: str) -> None:
+    account = await get_account_by_id(account_id)
+    if not account:
+        logger.warning("delete account skipped: account not found %s", account_id)
+        return
+
+    ensure_data_dirs()
+    job_id = uuid.uuid4().hex
+    file_paths = await _account_local_cache_files(account.id, account.email)
+    total_files = len(file_paths)
+    await create_history_sync_job(
+        {
+            "id": job_id,
+            "account_id": account.id,
+            "user_uid": account.user_uid,
+            "job_type": "account_delete",
+            "status": "pending",
+            "current_folder": account.email,
+            "current_page": 1,
+            "current_uid": 0,
+            "total_folders": max(total_files, 1),
+            "completed_folders": 0,
+            "fetched_messages": 0,
+            "downloaded_attachments": 0,
+            "downloaded_inline_images": 0,
+            "error_message": "",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "finished_at": 0,
+        }
+    )
+
+    try:
+        await update_history_sync_job(job_id, status="running")
+        await sync_service.remove_account(account.id)
+
+        total_messages = await delete_cached_messages_by_account(account.id)
+        await delete_cached_attachments_by_account(account.id)
+        await delete_folder_stats_by_account(account.id)
+        await update_history_sync_job(job_id, fetched_messages=total_messages)
+
+        removed_files = 0
+        for path in file_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            removed_files += 1
+            await update_history_sync_job(
+                job_id,
+                completed_folders=removed_files,
+                downloaded_attachments=removed_files,
+            )
+            await asyncio.sleep(0)
+        clear_account_storage(account.id, account.email)
+
+        await delete_history_sync_jobs_by_account(account.id, keep_job_id=job_id)
+        await delete_account(account.id, account.user_uid)
+        await update_history_sync_job(
+            job_id,
+            status="completed",
+            completed_folders=max(removed_files, total_files),
+            downloaded_attachments=removed_files,
+            finished_at=time.time(),
+        )
+    except Exception as exc:
+        logger.warning("delete account failed for %s: %s", account.email, exc)
         await update_history_sync_job(
             job_id,
             status="failed",
@@ -674,9 +769,9 @@ async def run_history_sync(
             for folder in folders:
                 folder_name = getattr(folder, "path", "") or getattr(folder, "name", "") or "INBOX"
                 try:
-                    total += await get_cached_body_count(account.id, folder_name)
+                    total += await get_cached_count(account.id, folder_name)
                 except Exception as exc:
-                    logger.debug("history sync cached body count failed: account=%s folder=%s error=%s", account.email, folder_name, exc)
+                    logger.debug("history sync cached count failed: account=%s folder=%s error=%s", account.email, folder_name, exc)
             return total
 
         fetched_messages = max(fetched_messages, await _local_synced_count())

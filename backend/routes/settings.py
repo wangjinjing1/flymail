@@ -11,10 +11,10 @@ from deps import get_uid
 from db import (
     get_accounts,
     get_cached_attachment_rows,
-    get_cached_body_count,
     get_cached_count,
     get_folder_stats,
     get_history_sync_job,
+    list_account_folder_counts,
     list_history_sync_jobs,
 )
 from services.history_sync import (
@@ -87,10 +87,16 @@ FOLDER_PROGRESS_ITEMS = [
 
 async def _build_folder_progress(account_id: str) -> list[dict]:
     items = []
+    count_by_key = {
+        item.get("folder_key"): item
+        for item in await list_account_folder_counts(account_id)
+    }
     for folder_key, label in FOLDER_PROGRESS_ITEMS:
         folder_stats = await get_folder_stats(account_id, folder_key)
         cached_count = await get_cached_count(account_id, folder_key)
-        synced_count = await get_cached_body_count(account_id, folder_key)
+        synced_count = int((count_by_key.get(folder_key.lower()) or {}).get("cached_count", 0) or 0)
+        if not synced_count:
+            synced_count = cached_count
         sync_job = await get_history_sync_job(account_id, job_type=f"folder_sync:{folder_key}")
         clear_job = await get_history_sync_job(account_id, job_type=f"folder_clear:{folder_key}")
         total_count = int(folder_stats.get("total_count", 0) or 0)

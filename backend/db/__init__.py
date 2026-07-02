@@ -1056,12 +1056,18 @@ async def list_history_sync_jobs(user_uid: str) -> List[dict]:
     return [dict(zip(columns, row)) for row in rows]
 
 
-async def delete_history_sync_jobs_by_account(account_id: str) -> int:
+async def delete_history_sync_jobs_by_account(account_id: str, keep_job_id: str = "") -> int:
     db = await get_db()
-    cursor = await db.execute(
-        "DELETE FROM history_sync_jobs WHERE account_id = ?",
-        (account_id,),
-    )
+    if keep_job_id:
+        cursor = await db.execute(
+            "DELETE FROM history_sync_jobs WHERE account_id = ? AND id != ?",
+            (account_id, keep_job_id),
+        )
+    else:
+        cursor = await db.execute(
+            "DELETE FROM history_sync_jobs WHERE account_id = ?",
+            (account_id,),
+        )
     await db.commit()
     return cursor.rowcount
 
@@ -1190,13 +1196,26 @@ async def get_account_by_id(account_id: str):
 
 async def get_accounts(user_uid: str) -> List[Account]:
     db = await get_db()
-    cursor = await db.execute(
-        'SELECT * FROM accounts WHERE user_uid = ? ORDER BY created_at ASC',
-        (user_uid,),
-    )
+    if user_uid:
+        cursor = await db.execute(
+            'SELECT * FROM accounts WHERE user_uid = ? ORDER BY created_at ASC',
+            (user_uid,),
+        )
+    else:
+        cursor = await db.execute('SELECT * FROM accounts ORDER BY created_at ASC')
     rows = await cursor.fetchall()
     columns = [description[0] for description in cursor.description]
     return [Account(**dict(zip(columns, row))) for row in rows]
+
+
+async def delete_account(account_id: str, user_uid: str) -> bool:
+    db = await get_db()
+    cursor = await db.execute(
+        'DELETE FROM accounts WHERE id = ? AND user_uid = ?',
+        (account_id, user_uid),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
 
 
 async def activate_account(account_id: str, user_uid: str = '') -> bool:

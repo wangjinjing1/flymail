@@ -3,13 +3,11 @@
 处理邮箱账号的添加（QQ/iCloud/网易/OAuth）、删除、更新、测试连接、
 重建同步等操作。同时包含 OAuth 授权流程所需的辅助函数。
 """
-import asyncio
 import json
 import ssl
 import time
 import uuid
 
-from data_paths import clear_account_storage
 from fastapi import APIRouter, Request, Body, Path as FastAPIPath
 
 from errors import AppError
@@ -19,17 +17,14 @@ from db import (
     get_accounts,
     create_account,
     deactivate_account,
-    delete_cached_attachments_by_account,
-    delete_cached_messages_by_account,
-    delete_folder_stats_by_account,
-    delete_history_sync_jobs_by_account,
+    list_history_sync_jobs,
     update_account_info,
 )
 from deps import get_uid
 from models import Account
 from providers.base import Credentials
 from providers.factory import ProviderFactory
-from services.history_sync import schedule_history_sync, start_clear_cache
+from services.history_sync import schedule_history_sync, start_clear_cache, start_delete_account
 from services.mail_cache import initial_sync
 from services.settings import async_load_settings, async_save_settings
 from services.sync import sync_service
@@ -72,10 +67,6 @@ _AUTH_CODE_SUFFIX_ERRORS = {
 # ==================== 内部辅助函数 ====================
 # 从 _helpers 复用共享辅助函数，避免与其他 routes 模块重复定义
 from routes._helpers import _find_account_or_error, _safe_disconnect
-
-
-def _clear_account_local_cache(account_id: str, account_email: str = "") -> None:
-    clear_account_storage(account_id, account_email)
 
 
 def _sync_gmail_config(settings: dict):
@@ -249,6 +240,17 @@ async def list_accounts(request: Request):
     return {"accounts": safe_accounts}
 
 
+@router.get("/delete-jobs", summary="获取账号删除任务")
+async def list_account_delete_jobs(request: Request):
+    uid = await get_uid(request)
+    jobs = await list_history_sync_jobs(uid, job_type="account_delete")
+    active_jobs = [
+        job for job in jobs
+        if job.get("status") in {"pending", "running", "failed"}
+    ]
+    return {"jobs": active_jobs}
+
+
 @router.post("/auth-url", response_model=AuthUrlResponse, summary="获取 OAuth 授权URL")
 async def get_auth_url(request: Request, body: AuthUrlRequest = Body(description="OAuth 授权参数")):
     """获取第三方邮箱的 OAuth2 授权跳转地址。
@@ -321,10 +323,7 @@ async def remove_account(
     account_id: str = FastAPIPath(description="账号唯一ID"),
     request: Request = None,
 ):
-    """删除邮箱账号，同时撤销第三方令牌并停止后台同步。
-
-    账号会被标记为 offline，保留本地缓存邮件和历史附件，便于继续离线查看。
-    """
+    """后台删除邮箱账号、本地邮件缓存和本地附件文件。"""
     uid = await get_uid(request)
 
     accounts = await get_accounts(uid)
@@ -338,31 +337,32 @@ async def remove_account(
         # 幂等删除：账号不存在也算成功（避免前端重复请求时误报错误）
         return {"success": True, "message": "账号不存在或已删除"}
 
-    try:
-        creds_data = json.loads(target.credentials_json)
-        credentials = Credentials(
-            provider_type=target.provider,
-            access_token=creds_data.get("access_token", ""),
-            refresh_token=creds_data.get("refresh_token", ""),
-            expires_at=creds_data.get("expires_at", 0),
-            extra=creds_data.get("extra", {}),
-        )
-        auth = ProviderFactory.get_auth(target.provider)
-        await auth.revoke_token(credentials)
-    except Exception as e:
-        logger.debug("撤销 OAuth token 失败（不影响删除账号）: %s", e)
+    started = await start_delete_account(account_id)
+    if not started:
+        raise AppError(409, "账号正在删除中")
+    return {"success": True, "message": "已开始后台删除"}
+
+
+@router.post("/{account_id}/disable", response_model=MessageResponse, summary="禁用邮箱账号")
+async def disable_account(
+    account_id: str = FastAPIPath(description="账号唯一ID"),
+    request: Request = None,
+):
+    """禁用邮箱账号，保留授权、本地邮件缓存和附件文件。"""
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    if not any(acc.id == account_id for acc in accounts):
+        raise AppError(404, "Account not found")
 
     await sync_service.remove_account(account_id)
-    # 清理同步锁，防止内存泄漏
     from services.mail_cache import remove_sync_lock
     remove_sync_lock(account_id)
-    # 修复 P4：清理 token 锁，防止内存泄漏
     from services.token import remove_token_lock
     remove_token_lock(account_id)
-    offline = await deactivate_account(account_id, uid, status="offline", clear_credentials=True)
-    if offline:
-        return {"success": True}
-    raise AppError(500, "Failed to mark account offline")
+    disabled = await deactivate_account(account_id, uid, status="offline", clear_credentials=False)
+    if disabled:
+        return {"success": True, "message": "账号已禁用"}
+    raise AppError(500, "Failed to disable account")
 
 
 @router.post("/{account_id}/rebuild-sync", response_model=MessageResponse, summary="重建同步")

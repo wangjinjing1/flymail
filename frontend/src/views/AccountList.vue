@@ -21,7 +21,7 @@
     </div>
 
     <!-- 空状态 -->
-    <div v-else-if="mailStore.accounts.length === 0" class="empty-state">
+    <div v-else-if="mailStore.accounts.length === 0 && deleteJobs.length === 0" class="empty-state">
       <div class="empty-icon">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
           <rect x="2" y="4" width="20" height="16" rx="2"/>
@@ -34,6 +34,17 @@
 
     <!-- 账号列表 -->
     <div v-else class="account-sections">
+      <div v-if="deleteJobs.length" class="delete-jobs">
+        <div v-for="job in deleteJobs" :key="job.id" class="delete-job">
+          <div class="delete-job-main">
+            <span class="delete-job-title">正在删除 {{ job.current_folder || '邮箱账号' }}</span>
+            <span class="delete-job-meta">{{ deleteJobText(job) }}</span>
+          </div>
+          <div class="delete-progress">
+            <span class="delete-progress-bar" :style="{ width: deleteJobPercent(job) + '%' }"></span>
+          </div>
+        </div>
+      </div>
       <div v-for="section in groupedAccounts" :key="section.key" class="account-section">
         <!-- 分组标题 -->
         <div class="section-header">
@@ -220,7 +231,8 @@
           <button v-if="editingAccount?.status === 'offline' || mailStore.reauthAccountIds.has(editingAccount?.id)" class="btn btn-secondary" @click="reconnectAccount(editingAccount!)">
             {{ editingAccount?.status === 'offline' ? '重新连接' : '重新授权' }}
           </button>
-          <button class="btn btn-danger-text" @click="confirmDelete(editingAccount!)">删除账号</button>
+          <button v-if="editingAccount?.status !== 'offline'" class="btn btn-secondary" @click="confirmDisable(editingAccount!)">禁用账户</button>
+          <button class="btn btn-danger-text" @click="confirmDelete(editingAccount!)">删除账户</button>
           <button class="btn btn-primary" @click="saveEdit">保存</button>
         </div>
       </div>
@@ -275,6 +287,8 @@ const icloudForm = ref({ email: '', auth_code: '' });
 const MICROSOFT_ICON_SVG = '<svg width="24" height="24" viewBox="0 0 1024 1024"><path d="M0.10238 51.189762h460.503099v460.503099H0.10238V51.189762z" fill="#F45325"/><path d="M512.204759 51.189762H972.707858v460.503099h-460.503099V51.189762z" fill="#81BD06"/><path d="M0.10238 563.292142h460.503099v460.656668H0.10238v-460.656668z" fill="#04A6EF"/><path d="M512.204759 563.292142H972.707858v460.656668h-460.503099v-460.656668z" fill="#FFBA07"/></svg>';
 const editingAccount = ref<any>(null);
 const editForm = ref({ remark: '', group_name: '', hide_email: false, poll_interval_seconds: 10 });
+const deleteJobs = ref<any[]>([]);
+let deleteJobTimer: number | null = null;
 
 const providers = [
   {
@@ -370,6 +384,7 @@ onMounted(async () => {
   window.addEventListener('message', handleOAuthMessage);
   connectWs();
   await mailStore.loadAccounts();
+  await loadDeleteJobs();
   loading.value = false;
   // 立即将所有账号状态设为 checking，避免 sessionStorage 缓存的旧状态闪烁
   mailStore.accounts.forEach((account: any) => {
@@ -385,10 +400,12 @@ onMounted(async () => {
     return;
   }
   checkAllAccountsStatus();
+  deleteJobTimer = window.setInterval(loadDeleteJobs, 2000);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('message', handleOAuthMessage);
+  if (deleteJobTimer) window.clearInterval(deleteJobTimer);
 });
 
 async function checkAllAccountsStatus() {
@@ -593,22 +610,69 @@ async function saveEdit() {
   }
 }
 
+async function loadDeleteJobs() {
+  try {
+    const data = await api.get('/accounts/delete-jobs') as any;
+    const previous = deleteJobs.value;
+    deleteJobs.value = data.jobs || [];
+    const hadActive = previous.some((job: any) => job.status === 'pending' || job.status === 'running');
+    const hasActive = deleteJobs.value.some((job: any) => job.status === 'pending' || job.status === 'running');
+    if (hadActive && !hasActive) {
+      await mailStore.loadAccounts();
+      if (mailStore.currentAccountId) await mailStore.loadFolders();
+    }
+  } catch (e) {
+    console.error('加载删除进度失败:', e);
+  }
+}
+
+function deleteJobPercent(job: any) {
+  const total = Math.max(Number(job.total_folders || 0), 1);
+  const done = Math.max(Number(job.completed_folders || 0), 0);
+  return Math.min(100, Math.round((done / total) * 100));
+}
+
+function deleteJobText(job: any) {
+  if (job.status === 'failed') return job.error_message || '删除失败';
+  if (job.status === 'completed') return '删除完成';
+  return `${job.completed_folders || 0} / ${job.total_folders || 0}`;
+}
+
+async function confirmDisable(account: any) {
+  const ok = await ui.showConfirm({
+    title: '禁用账户',
+    message: `确定要禁用 ${account.email} 吗？本地邮件和附件都会保留，授权也会保留；禁用后后台同步、实时刷新、手动刷新和查询都只使用本地缓存。`,
+    confirmText: '确认禁用',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api.post(`/accounts/${account.id}/disable`);
+    showEditDialog.value = false;
+    await mailStore.loadAccounts();
+    await mailStore.loadFolders();
+    ui.success('账户已禁用');
+  } catch (e: any) {
+    ui.error(e?.message || e?.error || e?.response?.data?.error || '禁用失败');
+  }
+}
+
 async function confirmDelete(account: any) {
   const ok = await ui.showConfirm({
-    title: '移除账号',
-    message: `确定要移除账号 ${account.email} 吗？远端登录会失效，但本地已缓存的邮件和附件会保留，可继续离线查看。`,
-    confirmText: '移除',
+    title: '删除账户',
+    message: `确定要删除 ${account.email} 吗？本地缓存的邮件、附件和图片都会被删除。这个过程可能比较慢，会在账户列表显示删除进度。`,
+    confirmText: '确认删除',
     danger: true,
   });
   if (ok) {
     try {
       await api.delete(`/accounts/${account.id}`);
-      // mailStore.loadAccounts() 会从后端重新加载，无需手动过滤
       mailStore.clearCurrentAccountState();
       await mailStore.loadAccounts();
-      await mailStore.loadFolders();
+      if (mailStore.currentAccountId) await mailStore.loadFolders();
+      await loadDeleteJobs();
       showEditDialog.value = false;
-      ui.success('账号已转为离线可查看');
+      ui.success('已开始后台删除');
     } catch (e: any) {
       ui.error(e?.message || e?.error || e?.response?.data?.error || '删除失败');
     }
@@ -774,6 +838,46 @@ async function reconnectAccount(account: any) {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
+}
+
+.delete-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.delete-job {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.delete-job-main {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.delete-job-title { font-weight: 600; }
+.delete-job-meta { color: var(--text-secondary); }
+
+.delete-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.16);
+  overflow: hidden;
+}
+
+.delete-progress-bar {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #ef4444;
+  transition: width 0.2s ease;
 }
 
 .section-header {

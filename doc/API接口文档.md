@@ -153,9 +153,27 @@
 
 ### `DELETE /api/accounts/{account_id}`
 
-移除邮箱账号。
+后台删除邮箱账号。
 
-说明：移除账号不会删除已经缓存下来的历史邮件正文和本地附件文件。
+说明：接口只启动后台删除任务并立即返回。后台任务会删除账号、本地缓存邮件记录、附件记录、文件夹统计和本地附件/图片文件。第三方授权不会额外调用撤销接口。
+
+### `POST /api/accounts/{account_id}/disable`
+
+禁用邮箱账号。
+
+说明：禁用账号会保留授权、本地邮件缓存和本地附件文件，只停止自动同步、实时刷新和手动远端刷新。禁用后邮件列表、查询、详情和附件接口只读取本地缓存。
+
+### `GET /api/accounts/delete-jobs`
+
+获取当前用户的账号删除任务。
+
+返回字段沿用历史同步任务结构，其中：
+
+- `status`：`pending`、`running`、`failed` 等任务状态。
+- `current_folder`：正在删除的邮箱地址。
+- `total_folders`：需要删除的本地文件总数。
+- `completed_folders`：已删除的本地文件数。
+- `fetched_messages`：已删除的本地缓存邮件数。
 
 ### `POST /api/accounts/{account_id}/test`
 
@@ -369,6 +387,8 @@
 - `is_synced`：`total_count > 0 && cached_count >= total_count`。
 
 前端历史同步页的“已同步邮件”汇总使用 `sum(folder_progress.cached_count) / sum(folder_progress.total_count)`，与各文件夹子标签保持同一口径。
+
+打开邮件详情时补全正文、附件或内嵌图片缓存，不会增加历史同步任务的“已同步邮件”数量；该数量只随新增摘要缓存增长。
 
 ### `GET /api/history-sync/jobs/{account_id}`
 

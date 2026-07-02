@@ -496,6 +496,5 @@ async def update_account(
         body.poll_interval_seconds,
     )
     if updated:
-        create_background_task(sync_service.add_account(account_id), name="restart_account_imap")
         return {"success": True, "message": "账号信息已更新"}
     raise AppError(404, "Account not found")

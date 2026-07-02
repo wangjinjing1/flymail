@@ -206,7 +206,7 @@
         </button>
       </div>
 
-      <div v-if="!selectMode && totalPages > 1" class="pagination" :class="{ mobile: isMobile }">
+      <div v-if="!selectMode && mailStore.currentAccountId" class="pagination" :class="{ mobile: isMobile }">
         <button class="page-btn page-nav" :disabled="currentPage <= 1" @click="goPage(currentPage - 1)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
           <span v-if="isMobile">上一页</span>

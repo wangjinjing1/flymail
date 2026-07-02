@@ -222,6 +222,8 @@
 - `read_filter`
 - `attachment_filter`
 
+`folder` 支持核心文件夹别名：`INBOX`、`Sent`、`Drafts`、`Junk`、`Trash`。后端会根据 IMAP `LIST` 结果解析为服务商真实路径，例如网易已发送 `&XfJT0ZAB-`、Gmail 中文环境已发送 `[Gmail]/&XfJT0ZCuTvY-`。
+
 说明：
 - 在线账号的普通列表请求会优先读取本地缓存；当前页缓存不足、远端统计未知，或本地缓存数量少于 IMAP 已知总数时，才会从 IMAP 拉取当前页摘要并同步写入本地缓存。
 - 返回的 `total`、`unread_total` 和 `filter_counts.all/unread/read` 以 IMAP 当前状态为准；`filter_counts.read = all - unread`。
@@ -338,9 +340,15 @@
 
 获取应用设置。
 
+主要返回 OAuth 配置字段：`gmail_client_id`、`gmail_client_secret`、`gmail_redirect_uri`、`outlook_client_id`、`outlook_client_secret`、`outlook_redirect_uri`、`has_credentials`、`has_outlook_credentials`。密钥字段为脱敏值。
+
+上传临时附件清理仍由后端定时任务执行，默认每周一 02:00 清理；当前前端不再暴露清理星期和清理时间配置。
+
 ### `PUT /api/settings`
 
 更新应用设置。
+
+常用请求字段：`gmail_client_id`、`gmail_client_secret`、`gmail_redirect_uri`、`outlook_client_id`、`outlook_client_secret`、`outlook_redirect_uri`。未传入字段保持原值；密钥字段留空时不会覆盖已保存密钥。
 
 ### `GET /api/settings/oauth-diagnostic`
 

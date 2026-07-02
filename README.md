@@ -68,7 +68,7 @@ FLYMAIL_NO_PROXY=127.0.0.1,localhost
 
 当前仓库自带 `docker-compose.yml`，会：
 
-- 直接拉取 Docker Hub 镜像 `wangjinjing/flymail:latest`
+- 使用当前仓库源码构建 `wangjinjing/flymail:latest` 本地镜像
 - 读取根目录 `.env`
 - 将宿主机 `APP_PORT` 映射到容器 `8080`
 - 将 `${FLYMAIL_DATA_PATH:-./data}` 映射到容器内 `/app/data`
@@ -88,9 +88,10 @@ Copy-Item .env.example .env
 ### 2. 启动
 
 ```bash
-docker compose pull
-docker compose up -d
+docker compose up -d --build
 ```
+
+如果只执行 `docker compose up -d`，Docker 可能继续使用本地已有旧镜像。开发和本地部署时建议始终带上 `--build`，确保容器使用当前工作区代码。
 
 ### 3. 查看日志
 
@@ -143,7 +144,7 @@ docker push wangjinjing/flymail:1.0.0
 
 文件类数据保存在本地 `data/` 目录，适合直接映射到 Docker volume。当前按用途拆分为子目录：
 
-- `data/files/uploads/`: 写信时上传的临时附件，默认每周一 02:00 自动清理，可在设置页修改
+- `data/files/uploads/`: 写信时上传的临时附件，默认每周一 02:00 自动清理
 - `data/files/download/`: 历史邮件附件、图片与内嵌图片
 - `data/logs/`: 运行日志
 
@@ -180,6 +181,8 @@ docker push wangjinjing/flymail:1.0.0
 ## 邮件列表与计数口径
 
 在线账号打开普通邮件列表时，后端会优先读取本地缓存；只有当前页缓存不足、远端统计未知，或本地缓存数量少于 IMAP 已知总数时，才会从 IMAP 拉取当前页摘要并写回缓存。本地缓存用于离线查看、搜索、附件状态和详情加速。
+
+前端使用统一文件夹别名请求核心文件夹，例如 `INBOX`、`Sent`、`Drafts`、`Junk`、`Trash`。后端会通过 IMAP 文件夹列表解析到服务商真实路径，例如网易已发送的 `&XfJT0ZAB-`、Gmail 中文环境下的 `[Gmail]/&XfJT0ZCuTvY-`。已发送文件夹不会因为本地 0 统计而跳过远端刷新。
 
 文件夹计数以 IMAP 返回的当前状态为准：收件箱和垃圾邮箱显示未读数，已发送、草稿箱和已删除显示邮件总数。收件箱列表顶部的“全部 / 未读 / 已读”同样使用 IMAP 总数和未读数计算，其中已读数为 `全部 - 未读`。附件数量仍来自本地缓存，因为标准 IMAP 计数接口不直接返回附件总数。
 

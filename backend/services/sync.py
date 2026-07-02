@@ -290,7 +290,7 @@ class MailSyncService:
         self.periodic_task = None
 
     async def _periodic_sync_loop(self):
-        from services.mail_cache import sync_folder_to_cache
+        from services.mail_cache import sync_recent_folder_to_cache
 
         while self._running:
             try:
@@ -319,7 +319,7 @@ class MailSyncService:
                             continue
                         seen.add(folder_name)
                         try:
-                            await sync_folder_to_cache(account, folder_name)
+                            await sync_recent_folder_to_cache(account, folder_name)
                             await self.refresh_clients(account.id, folder_name, user_uid=account.user_uid)
                         except Exception as exc:
                             logger.debug("periodic sync failed: account=%s folder=%s error=%s", account.email, folder_name, exc)
@@ -444,8 +444,8 @@ class MailSyncService:
         """处理新邮件：同步缓存 + 推送通知 + 刷新列表"""
         logger.info("账号 %s 文件夹 %s 检测到新邮件", account.email, folder)
         try:
-            from services.mail_cache import sync_folder_to_cache
-            new_count = await sync_folder_to_cache(account, folder)
+            from services.mail_cache import sync_recent_folder_to_cache
+            new_count = await sync_recent_folder_to_cache(account, folder)
         except Exception as e:
             logger.warning("缓存同步失败: %s", e)
             new_count = 0

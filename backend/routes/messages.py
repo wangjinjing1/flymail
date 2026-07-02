@@ -178,39 +178,60 @@ def _message_to_item(message, account_id: str) -> dict:
     }
 
 
-async def _cache_remote_messages(account: Account, messages: list) -> None:
-    if not messages:
+async def _cache_remote_page(account: Account, folder: str, result: MessageList) -> None:
+    if not result:
         return
-    from services.mail_cache import _messages_to_cached
+    from services.mail_cache import _messages_to_cached, try_acquire_sync_lock
 
-    cached_messages = _messages_to_cached(messages, account)
-    await upsert_cached_messages(cached_messages)
+    lock = await try_acquire_sync_lock(account.id)
+    if not lock:
+        logger.debug("cache remote page skipped: account=%s folder=%s sync busy", account.email, folder)
+        return
+
+    try:
+        if result.messages:
+            cached_messages = _messages_to_cached(result.messages, account)
+            await upsert_cached_messages(cached_messages)
+        await upsert_folder_stats(account.id, folder, result.total, result.unread_total)
+    finally:
+        lock.release()
 
 
 async def _cache_remote_detail_with_assets(receiver, account: Account, folder: str, detail) -> dict | None:
-    from services.mail_cache import _messages_to_cached
+    from services.mail_cache import _messages_to_cached, try_acquire_sync_lock
     from services.history_sync import _cache_message_assets
 
-    cached_detail = await get_cached_message_detail(account.id, detail.uid, folder)
-    effective_message_date = coalesce_message_date(detail.date, (cached_detail or {}).get("date", ""))
-    body_html, storage_path, _att_count, _inline_count, attachment_records = await _cache_message_assets(
-        receiver,
-        account,
-        folder,
-        detail,
-    )
-    detail.body_html = body_html
-    detail.date = coalesce_message_date(detail.date, effective_message_date)
-    cached_messages = _messages_to_cached([detail], account)
-    if cached_messages:
-        cached_messages[0].storage_path = storage_path
-    await upsert_cached_messages(cached_messages)
-    if attachment_records:
-        await upsert_cached_attachments(attachment_records)
-    cached_payload = await get_cached_message_detail(account.id, detail.uid, folder)
-    if cached_payload:
-        cached_payload["attachments"] = await list_cached_attachments(account.id, detail.uid, folder)
-    return cached_payload
+    lock = await try_acquire_sync_lock(account.id)
+    if not lock:
+        logger.debug("cache remote detail skipped: account=%s sync busy", account.email)
+        cached_payload = await get_cached_message_detail(account.id, detail.uid, folder)
+        if cached_payload:
+            cached_payload["attachments"] = await list_cached_attachments(account.id, detail.uid, folder)
+        return cached_payload or _message_to_item(detail, account.id)
+
+    try:
+        cached_detail = await get_cached_message_detail(account.id, detail.uid, folder)
+        effective_message_date = coalesce_message_date(detail.date, (cached_detail or {}).get("date", ""))
+        body_html, storage_path, _att_count, _inline_count, attachment_records = await _cache_message_assets(
+            receiver,
+            account,
+            folder,
+            detail,
+        )
+        detail.body_html = body_html
+        detail.date = coalesce_message_date(detail.date, effective_message_date)
+        cached_messages = _messages_to_cached([detail], account)
+        if cached_messages:
+            cached_messages[0].storage_path = storage_path
+        await upsert_cached_messages(cached_messages)
+        if attachment_records:
+            await upsert_cached_attachments(attachment_records)
+        cached_payload = await get_cached_message_detail(account.id, detail.uid, folder)
+        if cached_payload:
+            cached_payload["attachments"] = await list_cached_attachments(account.id, detail.uid, folder)
+        return cached_payload
+    finally:
+        lock.release()
 
 
 async def _cache_detail_assets_in_background(account: Account, folder: str, uid_num: int, user_uid: str) -> None:
@@ -277,8 +298,7 @@ async def _fetch_remote_page_to_cache(
                 await _safe_disconnect(receiver)
 
         result, remote_folder = await _with_outlook_retry(account, _fetch_remote)
-        await _cache_remote_messages(account, result.messages)
-        await upsert_folder_stats(account.id, remote_folder, result.total, result.unread_total)
+        await _cache_remote_page(account, remote_folder, result)
         await sync_service.refresh_clients(account.id, folder, user_uid=user_uid)
         return result, ""
     except Exception as exc:
@@ -731,8 +751,7 @@ async def refresh_messages(
                 await _safe_disconnect(receiver)
 
         result, remote_folder = await _with_outlook_retry(account, _refresh_remote)
-        await _cache_remote_messages(account, result.messages)
-        await upsert_folder_stats(account.id, remote_folder, result.total, result.unread_total)
+        await _cache_remote_page(account, remote_folder, result)
         await sync_service.refresh_clients(account.id, folder, user_uid=user_uid)
     except Exception as exc:
         logger.warning("refresh messages failed: account=%s folder=%s error=%s", account.email, folder, exc)

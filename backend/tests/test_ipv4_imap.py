@@ -24,6 +24,18 @@ class IPv4IMAPTest(unittest.TestCase):
         self.assertIs(receiver._file, file_obj)
         self.assertIs(receiver.sock, ssl_sock)
 
+    def test_set_file_handle_also_supports_older_imaplib(self):
+        class OldStyleReceiver(IPv4IMAP4_SSL):
+            file = None
+
+        receiver = OldStyleReceiver.__new__(OldStyleReceiver)
+        file_obj = object()
+
+        receiver._set_file_handle(file_obj)
+
+        self.assertIs(receiver._file, file_obj)
+        self.assertIs(receiver.file, file_obj)
+
 
 if __name__ == "__main__":
     unittest.main()

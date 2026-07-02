@@ -44,7 +44,14 @@ class IPv4IMAP4_SSL(imaplib.IMAP4_SSL):
         self.host = host
         self.port = port
         self.sock = ssl_sock
-        self._file = self.sock.makefile('rb')
+        self._set_file_handle(self.sock.makefile('rb'))
+
+    def _set_file_handle(self, file_obj):
+        self._file = file_obj
+        try:
+            self.file = file_obj
+        except AttributeError:
+            pass
 
     def _get_ssl_context(self):
         """获取 SSL 上下文，子类可覆盖以自定义（如 Outlook 需要 TLS 1.2）"""

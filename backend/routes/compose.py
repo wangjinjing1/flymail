@@ -8,6 +8,7 @@
 import asyncio
 import uuid
 from datetime import datetime
+from services.scheduler import LOCAL_TIMEZONE
 
 from fastapi import APIRouter, Request, Body
 
@@ -194,6 +195,8 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
         try:
             from services.scheduler import schedule_email
             run_time = datetime.fromisoformat(body.schedule_time)
+            if run_time.tzinfo is None:
+                run_time = run_time.replace(tzinfo=LOCAL_TIMEZONE)
             job_id = f"schedule_{user_uid}_{uuid.uuid4().hex[:8]}"
             schedule_email(
                 job_id=job_id,

@@ -365,6 +365,26 @@ async def disable_account(
     raise AppError(500, "Failed to disable account")
 
 
+@router.post("/{account_id}/enable", response_model=MessageResponse, summary="启用邮箱账号")
+async def enable_account(
+    account_id: str = FastAPIPath(description="账号唯一ID"),
+    request: Request = None,
+):
+    """启用已禁用的邮箱账号，复用已保留的授权，不要求重新输入授权码。"""
+    uid = await get_uid(request)
+    accounts = await get_accounts(uid)
+    account = next((acc for acc in accounts if acc.id == account_id), None)
+    if not account:
+        raise AppError(404, "Account not found")
+
+    enabled = await activate_account(account_id, uid, status="connected")
+    if not enabled:
+        raise AppError(500, "Failed to enable account")
+    create_background_task(sync_service.add_account(account_id), name="enable_account_imap")
+    create_background_task(initial_sync(account_id), name="enable_initial_sync")
+    return {"success": True, "message": "账号已启用"}
+
+
 @router.post("/{account_id}/rebuild-sync", response_model=MessageResponse, summary="重建同步")
 async def rebuild_sync(
     account_id: str = FastAPIPath(description="账号ID"),

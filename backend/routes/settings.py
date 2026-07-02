@@ -82,6 +82,12 @@ FOLDER_PROGRESS_ITEMS = [
     ("Trash", "已删除"),
 ]
 
+ACCOUNT_DISABLED_MESSAGE = "账户已禁用，请先在邮箱管理启用账户"
+
+
+def _disabled_account_response() -> dict:
+    return {"success": False, "message": ACCOUNT_DISABLED_MESSAGE, "code": "account_disabled"}
+
 
 async def _build_folder_progress(account_id: str) -> list[dict]:
     items = []
@@ -293,6 +299,7 @@ async def get_history_sync_jobs(request: Request):
                 "account_id": account.id,
                 "email": account.email,
                 "provider": account.provider,
+                "account_status": account.status,
                 "status": history_job.get("status", "idle") if history_job else "idle",
                 "job": history_job,
                 "clear_job": clear_job,
@@ -350,6 +357,8 @@ async def start_history_sync_job(account_id: str, request: Request):
     account = next((item for item in accounts if item.id == account_id), None)
     if not account:
         return {"success": False, "message": "account_not_found"}
+    if account.status == "offline":
+        return _disabled_account_response()
     started = await start_history_sync(account_id, reset=True)
     return {"success": started}
 
@@ -368,8 +377,11 @@ async def pause_history_sync_job(account_id: str, request: Request):
 async def resume_history_sync_job(account_id: str, request: Request):
     uid = await get_uid(request)
     accounts = await get_accounts(uid)
-    if not any(item.id == account_id for item in accounts):
+    account = next((item for item in accounts if item.id == account_id), None)
+    if not account:
         return {"success": False, "message": "account_not_found"}
+    if account.status == "offline":
+        return _disabled_account_response()
     resumed = await resume_history_sync(account_id)
     return {"success": resumed}
 
@@ -378,8 +390,11 @@ async def resume_history_sync_job(account_id: str, request: Request):
 async def retry_history_sync_job(account_id: str, request: Request):
     uid = await get_uid(request)
     accounts = await get_accounts(uid)
-    if not any(item.id == account_id for item in accounts):
+    account = next((item for item in accounts if item.id == account_id), None)
+    if not account:
         return {"success": False, "message": "account_not_found"}
+    if account.status == "offline":
+        return _disabled_account_response()
     retried = await retry_history_sync(account_id)
     return {"success": retried}
 
@@ -399,6 +414,8 @@ async def start_folder_history_sync_job(account_id: str, folder: str, request: R
     account = await _find_user_account(request, account_id)
     if not account:
         return {"success": False, "message": "account_not_found"}
+    if account.status == "offline":
+        return _disabled_account_response()
     started, message = await start_folder_history_sync(account_id, folder, reset=True)
     return {"success": started, "message": message}
 
@@ -417,6 +434,8 @@ async def resume_folder_history_sync_job(account_id: str, folder: str, request: 
     account = await _find_user_account(request, account_id)
     if not account:
         return {"success": False, "message": "account_not_found"}
+    if account.status == "offline":
+        return _disabled_account_response()
     resumed, message = await resume_folder_history_sync(account_id, folder)
     return {"success": resumed, "message": message}
 

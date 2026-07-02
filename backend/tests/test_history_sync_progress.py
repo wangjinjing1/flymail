@@ -160,6 +160,20 @@ class HistorySyncProgressTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["total_count"], 1)
         self.assertTrue(sent["is_synced"])
 
+    async def test_start_history_sync_rejects_disabled_account(self):
+        settings = _load_settings_route_module()
+        account = types.SimpleNamespace(id="account-1", status="offline")
+
+        with (
+            patch.object(settings, "get_accounts", AsyncMock(return_value=[account])),
+            patch.object(settings, "start_history_sync", AsyncMock(return_value=True)) as start_sync,
+        ):
+            result = await settings.start_history_sync_job("account-1", object())
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "account_disabled")
+        start_sync.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

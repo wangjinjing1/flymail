@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import os
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
@@ -13,6 +14,7 @@ from data_paths import CONFIG_DIR, ensure_data_dirs
 from services.outgoing_mail import ensure_sent_message_cached
 
 logger = logging.getLogger("flymail")
+LOCAL_TIMEZONE = ZoneInfo(os.environ.get("TZ") or "Asia/Shanghai")
 
 # 定时任务存储路径：使用 FLYMAIL_DATA_DIR 环境变量（与主数据库同目录）
 # 生产环境由 cmd/main 设置为 TRIM_PKGVAR（飞牛应用数据目录），
@@ -46,6 +48,7 @@ def _get_scheduler():
         scheduler = AsyncIOScheduler(
             jobstores={"default": SQLAlchemyJobStore(url=_jobstore_url)},
             job_defaults={"coalesce": True, "max_instances": 1},
+            timezone=LOCAL_TIMEZONE,
         )
     return scheduler
 

@@ -695,6 +695,19 @@ function statusText(status: string) {
 /** 重新授权指定账号（复用添加账号的 OAuth 流程） */
 async function reconnectAccount(account: any) {
   if (!account) return;
+  if (account.status === 'offline') {
+    try {
+      await api.post(`/accounts/${account.id}/enable`);
+      showEditDialog.value = false;
+      await mailStore.loadAccounts();
+      await mailStore.loadFolders();
+      checkAllAccountsStatus();
+      ui.success('账户已启用');
+    } catch (e: any) {
+      ui.error(e?.message || e?.error || e?.response?.data?.error || '启用失败');
+    }
+    return;
+  }
   if (account.provider === 'qq' || account.provider === 'netease' || account.provider === 'icloud') {
     openReconnectDialog(account);
     return;

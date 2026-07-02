@@ -108,6 +108,7 @@ interface HistorySyncItem {
   account_id: string
   email: string
   provider: string
+  account_status?: string
   status: string
   job: HistorySyncJob | null
   clear_job?: HistorySyncJob | null
@@ -122,6 +123,26 @@ let pollTimer: number | null = null;
 let wsRefreshTimer: number | null = null;
 
 const { connect: connectWs, disconnect: disconnectWs } = useWebSocket(handleWsMessage);
+
+function isAccountDisabled(item: HistorySyncItem) {
+  return item.account_status === 'offline';
+}
+
+function showDisabledAccountTip(item?: HistorySyncItem) {
+  ui.warning(`${item?.email || '该账户'} 已禁用，请先在邮箱管理启用账户`);
+}
+
+function handleSyncActionResponse(data: any, fallback: string) {
+  if (data?.code === 'account_disabled') {
+    ui.warning(data.message || '账户已禁用，请先在邮箱管理启用账户');
+    return false;
+  }
+  if (!data?.success) {
+    ui.error(data?.message || fallback);
+    return false;
+  }
+  return true;
+}
 
 function scheduleLoadJobs() {
   if (wsRefreshTimer) window.clearTimeout(wsRefreshTimer);
@@ -153,6 +174,10 @@ async function loadJobs(options: { showError?: boolean; manual?: boolean; initia
 }
 
 async function refreshSync(item: HistorySyncItem) {
+  if (isAccountDisabled(item)) {
+    showDisabledAccountTip(item);
+    return;
+  }
   const ok = await ui.showConfirm({
     title: '刷新同步',
     message: `确定要补全同步 ${item.email} 的历史邮件吗？本地已有邮件和附件会复用，不会重复下载。`,
@@ -161,10 +186,7 @@ async function refreshSync(item: HistorySyncItem) {
   if (!ok) return;
   try {
     const data = await api.post(`/history-sync/jobs/${item.account_id}/start`) as any;
-    if (!data?.success) {
-      ui.error(data?.message || '刷新同步失败');
-      return;
-    }
+    if (!handleSyncActionResponse(data, '刷新同步失败')) return;
     ui.success('已开始刷新同步');
     await loadJobs();
   } catch (e: any) {
@@ -183,8 +205,14 @@ async function pauseJob(accountId: string) {
 }
 
 async function resumeJob(accountId: string) {
+  const item = jobs.value.find((job) => job.account_id === accountId);
+  if (item && isAccountDisabled(item)) {
+    showDisabledAccountTip(item);
+    return;
+  }
   try {
-    await api.post(`/history-sync/jobs/${accountId}/resume`);
+    const data = await api.post(`/history-sync/jobs/${accountId}/resume`) as any;
+    if (!handleSyncActionResponse(data, '继续失败')) return;
     ui.success('已继续同步');
     await loadJobs();
   } catch (e: any) {
@@ -193,12 +221,14 @@ async function resumeJob(accountId: string) {
 }
 
 async function retryJob(accountId: string) {
+  const item = jobs.value.find((job) => job.account_id === accountId);
+  if (item && isAccountDisabled(item)) {
+    showDisabledAccountTip(item);
+    return;
+  }
   try {
     const data = await api.post(`/history-sync/jobs/${accountId}/retry`) as any;
-    if (!data?.success) {
-      ui.error(data?.message || '重试失败');
-      return;
-    }
+    if (!handleSyncActionResponse(data, '重试失败')) return;
     ui.success('已从失败断点重试');
     await loadJobs();
   } catch (e: any) {

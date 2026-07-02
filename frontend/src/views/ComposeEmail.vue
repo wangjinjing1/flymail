@@ -449,13 +449,11 @@ const schedulePreview = computed(() => {
 function formatScheduleTime(isoStr: string): string {
   if (!isoStr) return '';
   try {
-    const d = new Date(isoStr);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    const h = String(d.getHours()).padStart(2, '0');
-    const min = String(d.getMinutes()).padStart(2, '0');
-    return `${y}-${m}-${day} ${h}:${min}`;
+    const match = isoStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+    if (match) {
+      return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}`;
+    }
+    return isoStr;
   } catch { return isoStr; }
 }
 
@@ -783,6 +781,15 @@ async function scheduleMail() {
   const min = String(scheduleMinute.value).padStart(2, '0');
   const scheduleTimeISO = `${y}-${m}-${d}T${h}:${min}:00`;
   try {
+    await api.post('/messages/compose', {
+      account_id: fromAccountId.value,
+      to: toList.value,
+      cc: ccList.value,
+      bcc: bccList.value,
+      subject: subject.value,
+      body_html: bodyHtml.value,
+      action: 'draft',
+    });
     await api.post('/messages/compose', {
       account_id: fromAccountId.value,
       to: toList.value,

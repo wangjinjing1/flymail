@@ -101,6 +101,16 @@ export function getFolderCount(folder: { name?: string; path?: string; unread_co
     key.includes('draft') ||
     key.includes('deleted') ||
     key.includes('trash') ||
+    key.includes('\u5df2\u53d1\u9001') ||
+    key.includes('\u5df2\u53d1\u90ae\u4ef6') ||
+    key.includes('\u8349\u7a3f\u7bb1') ||
+    key.includes('\u5df2\u5220\u9664') ||
+    key.includes('&xfjt0zab-') ||
+    key.includes('&xfjt0zcutvy-') ||
+    key.includes('&g0l6p3ux-') ||
+    key.includes('&g0l6pw-') ||
+    key.includes('&xfjsijzk-') ||
+    key.includes('&xfjsijzkkk5o9g-') ||
     key.includes('[gmail]/sent mail') ||
     key.includes('[gmail]/drafts') ||
     key.includes('[gmail]/trash')

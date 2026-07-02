@@ -19,6 +19,19 @@ LOGS_DIR = BASE_DATA_DIR / "logs"
 UPLOADS_DIR = BASE_DATA_DIR / "uploads"
 DOCUMENTS_DIR = BASE_DATA_DIR / "document"
 PICTURES_DIR = BASE_DATA_DIR / "picture"
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".svg",
+    ".heic",
+    ".heif",
+}
 
 
 def _slugify(value: str) -> str:
@@ -88,6 +101,12 @@ def get_message_storage_key(message_date: str, account_id: str, account_email: s
     return str(Path(get_account_storage_slug(account_id, account_email)) / f"{dt.year:04d}" / f"{dt.month:02d}" / str(uid))
 
 
+def is_picture_attachment(filename: str, content_type: str) -> bool:
+    if (content_type or "").lower().startswith("image/"):
+        return True
+    return Path(filename or "").suffix.lower() in IMAGE_EXTENSIONS
+
+
 def build_message_file_path(
     *,
     message_date: str,
@@ -101,7 +120,7 @@ def build_message_file_path(
 ) -> tuple[str, Path]:
     storage_key = get_message_storage_key(message_date, account_id, account_email, uid, fallback=fallback_message_date)
     safe_filename = _slugify(filename or f"part_{part_number}")
-    is_picture = (content_type or "").lower().startswith("image/")
+    is_picture = is_picture_attachment(filename, content_type)
     base_dir = PICTURES_DIR if is_picture else DOCUMENTS_DIR
     return storage_key, base_dir / storage_key / f"{part_number}_{safe_filename}"
 
@@ -119,7 +138,7 @@ def find_legacy_message_file(
     safe_filename = _slugify(filename or f"part_{part_number}")
     candidate_name = f"{part_number}_{safe_filename}"
     roots = [PICTURES_DIR, DOCUMENTS_DIR]
-    preferred_root = PICTURES_DIR if (content_type or "").lower().startswith("image/") else DOCUMENTS_DIR
+    preferred_root = PICTURES_DIR if is_picture_attachment(filename, content_type) else DOCUMENTS_DIR
     search_roots = [preferred_root] + [root for root in roots if root != preferred_root]
 
     for root in search_roots:

@@ -76,7 +76,7 @@
           <button class="btn-icon mobile-filter-toggle" :class="{ active: hasActiveFilter }" @click="showMobileFilters = !showMobileFilters">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
           </button>
-          <button class="btn-icon" @click="refreshLatestPage" title="刷新最近一页" :disabled="syncing || rebuilding">
+          <button class="btn-icon" @click="refreshLatestPage" title="刷新最近一页" :disabled="syncing || rebuilding || !mailStore.currentAccountId">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.13-3.36L23 10"/><path d="M20.49 15A9 9 0 0 1 6.36 18.36L1 14"/>
             </svg>
@@ -161,7 +161,7 @@
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
           <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13L2 4"/>
         </svg>
-        <span>暂无邮件</span>
+        <span>{{ mailStore.currentAccountId ? '暂无邮件' : '暂无邮箱账号' }}</span>
       </div>
 
       <!-- 邮件列表 -->
@@ -743,7 +743,7 @@ async function switchAccount(id: string) {
 }
 
 async function refreshLatestPage() {
-  if (syncing.value || rebuilding.value) return;
+  if (syncing.value || rebuilding.value || !mailStore.currentAccountId) return;
   syncing.value = true;
   try {
     const params: Record<string, string | number> = {
@@ -819,6 +819,12 @@ async function onDeleteMessage() {
 /** 加载邮件列表（带竞态保护：只接受最新请求的结果） */
 async function loadMessages() {
   messages.value = [];
+  if (!mailStore.currentAccountId) {
+    resetVisibleListState();
+    loading.value = false;
+    syncing.value = false;
+    return;
+  }
   loading.value = true;
   syncing.value = true;
   const version = ++loadVersion;
@@ -1000,6 +1006,7 @@ function forwardMessage() {
 // 悬停预取：鼠标悬停时静默预取邮件正文，点击时大概率已缓存
 let _prefetchTimer: ReturnType<typeof setTimeout> | null = null;
 function prefetchMessage(msg: Message) {
+  if (!mailStore.currentAccountId) return;
   if (_prefetchTimer) return; // 防抖：300ms 内只预取一封
   _prefetchTimer = setTimeout(() => { _prefetchTimer = null; }, 300);
   const params: Record<string, string> = { folder: mailStore.currentFolder };
@@ -1009,6 +1016,7 @@ function prefetchMessage(msg: Message) {
 
 // 列表加载完成后，后台批量预取当前页邮件正文
 function prefetchVisibleMessages() {
+  if (!mailStore.currentAccountId) return;
   const ids = messages.value.slice(0, 10).map((m: Message) => m.id);
   if (ids.length === 0) return;
   api.post('/prefetch-messages', {

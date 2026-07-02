@@ -139,6 +139,9 @@ export const useMailStore = defineStore('mail', () => {
       sessionStorage.setItem('flymail_accounts', JSON.stringify(accounts.value));
       if (accounts.value.length === 0) {
         currentAccountId.value = '';
+        folderCountRequestVersion++;
+        folderCounts.value = {};
+        sessionStorage.removeItem('flymail_folder_counts');
         return;
       }
       const exists = accounts.value.some((account: any) => account.id === currentAccountId.value);
@@ -155,6 +158,12 @@ export const useMailStore = defineStore('mail', () => {
   }
 
   async function loadFolders() {
+    if (accounts.value.length === 0 || !currentAccountId.value) {
+      folderCountRequestVersion++;
+      folderCounts.value = {};
+      sessionStorage.removeItem('flymail_folder_counts');
+      return;
+    }
     try {
       const params: Record<string, string> = {};
       if (currentAccountId.value) params.account_id = currentAccountId.value;
@@ -176,6 +185,12 @@ export const useMailStore = defineStore('mail', () => {
   }
 
   async function loadFolderCounts() {
+    if (accounts.value.length === 0 || !currentAccountId.value) {
+      folderCountRequestVersion++;
+      folderCounts.value = {};
+      sessionStorage.removeItem('flymail_folder_counts');
+      return;
+    }
     const requestVersion = ++folderCountRequestVersion;
     try {
       const params: Record<string, string> = {};

@@ -720,10 +720,10 @@ async def delete_folder_stats_by_account(account_id: str) -> None:
 
 CORE_FOLDER_DEFINITIONS = [
     ("inbox", "INBOX", "收件箱", ["INBOX", "Inbox"]),
-    ("sent", "Sent Messages", "已发送", ["Sent", "Sent Messages", "Sent Items", "[Gmail]/Sent Mail"]),
-    ("drafts", "Drafts", "草稿箱", ["Drafts", "[Gmail]/Drafts"]),
-    ("junk", "Junk", "垃圾邮件", ["Junk", "Junk Email", "Spam", "[Gmail]/Spam"]),
-    ("trash", "Trash", "已删除", ["Trash", "Deleted", "Deleted Items", "Deleted Messages", "[Gmail]/Trash", "已删除"]),
+    ("sent", "Sent Messages", "已发送", ["Sent", "Sent Mail", "Sent Messages", "Sent Items", "[Gmail]/Sent Mail", "[Google Mail]/Sent Mail", "已发送"]),
+    ("drafts", "Drafts", "草稿箱", ["Drafts", "[Gmail]/Drafts", "[Google Mail]/Drafts", "草稿箱"]),
+    ("junk", "Junk", "垃圾邮件", ["Junk", "Junk Email", "Spam", "[Gmail]/Spam", "[Google Mail]/Spam", "垃圾邮件"]),
+    ("trash", "Trash", "已删除", ["Trash", "Deleted", "Deleted Items", "Deleted Messages", "[Gmail]/Trash", "[Google Mail]/Trash", "已删除"]),
 ]
 
 
@@ -1158,7 +1158,7 @@ def _expand_folder_aliases(folder: str) -> list[str]:
         {'Sent', 'Sent Mail', 'Sent Messages', 'Sent Items', '[Gmail]/Sent Mail', '[Google Mail]/Sent Mail', '已发送'},
         {'Drafts', '[Gmail]/Drafts', '[Google Mail]/Drafts', '草稿箱'},
         {'Junk', 'Junk Email', 'Spam', '[Gmail]/Spam', '[Google Mail]/Spam', '垃圾邮件'},
-        {'Trash', 'Deleted', 'Deleted Items', 'Deleted Messages', '[Gmail]/Trash', '已删除'},
+        {'Trash', 'Deleted', 'Deleted Items', 'Deleted Messages', '[Gmail]/Trash', '[Google Mail]/Trash', '已删除'},
     ]
     folder_lower = folder.lower()
     for group in alias_groups:

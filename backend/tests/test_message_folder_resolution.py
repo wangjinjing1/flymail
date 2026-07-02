@@ -190,6 +190,52 @@ class MessageFolderResolutionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resolved, "&XfJT0ZAB-")
 
+    async def test_sent_zero_stats_are_rechecked_after_ttl(self):
+        messages = _load_messages_route_module()
+
+        folder_stats = {
+            "total_count": 0,
+            "unread_count": 0,
+            "updated_at": 1000,
+        }
+        local_data = {"messages": [], "total": 0}
+
+        messages.time.time = lambda: 1000 + messages.ZERO_COUNT_RECHECK_SECONDS + 1
+
+        self.assertFalse(messages._trust_zero_folder_stats("Sent", folder_stats))
+        self.assertFalse(
+            messages._local_page_is_complete(
+                local_data,
+                folder_stats,
+                page=1,
+                page_size=50,
+                trust_zero_stats=messages._trust_zero_folder_stats("Sent", folder_stats),
+            )
+        )
+
+    async def test_recent_sent_zero_stats_are_temporarily_trusted(self):
+        messages = _load_messages_route_module()
+
+        folder_stats = {
+            "total_count": 0,
+            "unread_count": 0,
+            "updated_at": 1000,
+        }
+        local_data = {"messages": [], "total": 0}
+
+        messages.time.time = lambda: 1000 + messages.ZERO_COUNT_RECHECK_SECONDS - 1
+
+        self.assertTrue(messages._trust_zero_folder_stats("Sent", folder_stats))
+        self.assertTrue(
+            messages._local_page_is_complete(
+                local_data,
+                folder_stats,
+                page=1,
+                page_size=50,
+                trust_zero_stats=messages._trust_zero_folder_stats("Sent", folder_stats),
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

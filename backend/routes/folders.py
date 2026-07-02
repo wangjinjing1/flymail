@@ -13,7 +13,7 @@ logger = get_logger("routes.folders")
 router = APIRouter(tags=["folders"])
 
 
-SENT_FOLDER_KEYS = {"sent", "sent messages", "sent items", "[gmail]/sent mail"}
+SENT_FOLDER_KEYS = {"sent", "sent messages", "sent items", "sent mail", "[gmail]/sent mail", "[google mail]/sent mail", "已发送"}
 
 
 def _counts_response_from_rows(rows: list[dict]) -> dict[str, dict]:

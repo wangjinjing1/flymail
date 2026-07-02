@@ -67,6 +67,7 @@ router = APIRouter(tags=["邮件"])
 ensure_data_dirs()
 
 _REMOTE_PAGE_REFRESHING: set[tuple[str, str, int, int]] = set()
+ZERO_COUNT_RECHECK_SECONDS = 300
 
 
 def _extract_uid(message_id: str) -> str:
@@ -466,7 +467,24 @@ def _build_remote_list_response(result: MessageList, account_id: str, filter_cou
     }
 
 
-def _local_page_is_complete(local_data: dict, folder_stats: dict, page: int, page_size: int, read_filter: str = "") -> bool:
+def _trust_zero_folder_stats(folder: str, folder_stats: dict) -> bool:
+    alias_key = _remote_folder_alias_key(folder)
+    if alias_key != "sent":
+        return True
+    updated_at = float(folder_stats.get("updated_at", 0) or 0)
+    if not updated_at:
+        return False
+    return time.time() - updated_at < ZERO_COUNT_RECHECK_SECONDS
+
+
+def _local_page_is_complete(
+    local_data: dict,
+    folder_stats: dict,
+    page: int,
+    page_size: int,
+    read_filter: str = "",
+    trust_zero_stats: bool = True,
+) -> bool:
     if not folder_stats.get("updated_at"):
         return False
 
@@ -480,7 +498,7 @@ def _local_page_is_complete(local_data: dict, folder_stats: dict, page: int, pag
         remote_total = total_count
     local_total = int(local_data.get("total", 0) or 0)
     if remote_total == 0:
-        return True
+        return trust_zero_stats
     if local_total < remote_total:
         return False
 
@@ -563,9 +581,10 @@ async def list_messages(
         attachment_filter=attachment_filter,
     )
     folder_stats = await _get_effective_folder_stats(account.id, folder)
+    trust_zero_stats = _trust_zero_folder_stats(folder, folder_stats)
 
     if not read_filter and not attachment_filter:
-        if _local_page_is_complete(local_data, folder_stats, page, page_size, read_filter):
+        if _local_page_is_complete(local_data, folder_stats, page, page_size, read_filter, trust_zero_stats):
             _apply_remote_filter_counts(local_data, folder_stats)
             return local_data
         if local_data.get("messages"):
@@ -625,7 +644,7 @@ async def list_messages(
 
     remote_result = None
     remote_error = ""
-    if read_filter and not attachment_filter and not _local_page_is_complete(local_data, folder_stats, page, page_size, read_filter):
+    if read_filter and not attachment_filter and not _local_page_is_complete(local_data, folder_stats, page, page_size, read_filter, trust_zero_stats):
         if not local_data.get("messages"):
             if folder_stats.get("updated_at"):
                 if account.status != "offline" and not sync_service.is_account_suspended(account.id):
@@ -660,7 +679,7 @@ async def list_messages(
                 remote_result,
                 local_data.get("filter_counts", {}),
             )
-        elif _local_page_is_complete(local_data, folder_stats, page, page_size, read_filter):
+        elif _local_page_is_complete(local_data, folder_stats, page, page_size, read_filter, trust_zero_stats):
             _apply_remote_filter_counts(local_data, folder_stats)
         elif folder_stats.get("updated_at"):
             _apply_remote_filter_counts(local_data, folder_stats)

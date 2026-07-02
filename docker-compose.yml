@@ -1,5 +1,7 @@
 services:
   flymail-app:
+    build:
+      context: .
     image: wangjinjing/flymail:latest
     container_name: flymail
     restart: unless-stopped

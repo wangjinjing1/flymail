@@ -190,6 +190,20 @@ class MessageFolderResolutionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resolved, "&XfJT0ZAB-")
 
+    async def test_resolves_gmail_sent_folder_by_path_alias(self):
+        messages = _load_messages_route_module()
+
+        class Receiver:
+            async def fetch_folders(self):
+                return [
+                    Folder(name="收件箱", path="INBOX"),
+                    Folder(name="已发送", path="[Gmail]/Sent Mail"),
+                ]
+
+        resolved = await messages._resolve_remote_folder(Receiver(), "Sent")
+
+        self.assertEqual(resolved, "[Gmail]/Sent Mail")
+
     async def test_sent_zero_stats_are_rechecked_after_ttl(self):
         messages = _load_messages_route_module()
 
@@ -213,7 +227,7 @@ class MessageFolderResolutionTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_recent_sent_zero_stats_are_temporarily_trusted(self):
+    async def test_recent_sent_zero_stats_are_not_trusted(self):
         messages = _load_messages_route_module()
 
         folder_stats = {
@@ -223,10 +237,8 @@ class MessageFolderResolutionTest(unittest.IsolatedAsyncioTestCase):
         }
         local_data = {"messages": [], "total": 0}
 
-        messages.time.time = lambda: 1000 + messages.ZERO_COUNT_RECHECK_SECONDS - 1
-
-        self.assertTrue(messages._trust_zero_folder_stats("Sent", folder_stats))
-        self.assertTrue(
+        self.assertFalse(messages._trust_zero_folder_stats("Sent", folder_stats))
+        self.assertFalse(
             messages._local_page_is_complete(
                 local_data,
                 folder_stats,

@@ -486,10 +486,7 @@ def _trust_zero_folder_stats(folder: str, folder_stats: dict) -> bool:
     alias_key = _remote_folder_alias_key(folder)
     if alias_key != "sent":
         return True
-    updated_at = float(folder_stats.get("updated_at", 0) or 0)
-    if not updated_at:
-        return False
-    return time.time() - updated_at < ZERO_COUNT_RECHECK_SECONDS
+    return False
 
 
 def _local_page_is_complete(

@@ -39,7 +39,7 @@
       </header>
 
       <main class="content" :class="`content-${currentView}`">
-        <ComposeEmail v-if="currentView === 'compose'" @discard="currentView = 'mail'" />
+        <ComposeEmail v-if="currentView === 'compose'" @discard="returnToMail" @sent="returnToMail" />
         <template v-else-if="currentView === 'mail'">
           <KeepAlive>
             <MailList />
@@ -82,7 +82,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AccountList from './views/AccountList.vue';
 import ComposeEmail from './views/ComposeEmail.vue';
 import HistorySync from './views/HistorySync.vue';
@@ -99,14 +99,14 @@ const uiStore = useUIStore();
 
 const currentUser = ref<any>(null);
 const authReady = ref(false);
-const currentView = ref(sessionStorage.getItem('flymail_view') || 'compose');
+const savedView = sessionStorage.getItem('flymail_view') || 'mail';
+const currentView = ref(savedView === 'compose' ? 'mail' : savedView);
 
 const isAdmin = computed(() => currentUser.value?.role === 'admin');
 
 const navItems = computed(() => {
   const items = [
-    { key: 'compose', label: '写邮件' },
-    { key: 'mail', label: '邮件' },
+    { key: 'mail', label: '邮件管理' },
     { key: 'history-sync', label: '同步管理' },
     { key: 'accounts', label: '账号管理' },
     { key: 'settings', label: '设置' },
@@ -117,7 +117,10 @@ const navItems = computed(() => {
   return items;
 });
 
-const currentTitle = computed(() => navItems.value.find((item) => item.key === currentView.value)?.label || 'FlyMail');
+const currentTitle = computed(() => {
+  if (currentView.value === 'compose') return '写邮件';
+  return navItems.value.find((item) => item.key === currentView.value)?.label || 'FlyMail';
+});
 
 async function bootstrapAfterLogin() {
   currentUser.value = await api.get('/auth/me');
@@ -160,18 +163,40 @@ async function changePassword() {
   uiStore.success('密码已更新');
 }
 
-onMounted(checkAuth);
+function returnToMail() {
+  currentView.value = 'mail';
+}
+
+function handleNavigate(event: Event) {
+  const detail = (event as CustomEvent).detail;
+  if (detail === 'compose') {
+    currentView.value = 'compose';
+  } else if (typeof detail === 'string') {
+    currentView.value = detail;
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('flymail-navigate', handleNavigate);
+  checkAuth();
+});
+
+onUnmounted(() => {
+  window.removeEventListener('flymail-navigate', handleNavigate);
+});
 
 watch(currentView, (value) => {
   if (value === 'users' && !isAdmin.value) {
     currentView.value = 'mail';
     return;
   }
-  if (!navItems.value.some((item) => item.key === value)) {
-    currentView.value = 'compose';
+  if (value !== 'compose' && !navItems.value.some((item) => item.key === value)) {
+    currentView.value = 'mail';
     return;
   }
-  sessionStorage.setItem('flymail_view', value);
+  if (value !== 'compose') {
+    sessionStorage.setItem('flymail_view', value);
+  }
 });
 </script>
 

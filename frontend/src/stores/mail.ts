@@ -5,10 +5,10 @@ import { useUIStore } from './ui';
 
 const CORE_FOLDERS = [
   { name: '收件箱', defaultPath: 'INBOX', aliases: ['INBOX', 'Inbox'] },
-  { name: '已发送', defaultPath: 'Sent Messages', aliases: ['Sent Messages', 'Sent Items', 'Sent', '[Gmail]/Sent Mail'] },
-  { name: '草稿箱', defaultPath: 'Drafts', aliases: ['Drafts', '[Gmail]/Drafts'] },
-  { name: '垃圾邮件', defaultPath: 'Junk', aliases: ['Junk', 'Junk Email', 'Spam', '[Gmail]/Spam'] },
-  { name: '已删除', defaultPath: 'Trash', aliases: ['Trash', 'Deleted Items', 'Deleted', 'Deleted Messages', '[Gmail]/Trash', '已删除'] },
+  { name: '已发送', defaultPath: 'Sent Messages', aliases: ['Sent Messages', 'Sent Items', 'Sent', 'Sent Mail', '[Gmail]/Sent Mail', '[Google Mail]/Sent Mail', '已发送'] },
+  { name: '草稿箱', defaultPath: 'Drafts', aliases: ['Drafts', '[Gmail]/Drafts', '[Google Mail]/Drafts', '草稿箱'] },
+  { name: '垃圾邮件', defaultPath: 'Junk', aliases: ['Junk', 'Junk Email', 'Spam', '[Gmail]/Spam', '[Google Mail]/Spam', '垃圾邮件'] },
+  { name: '已删除', defaultPath: 'Trash', aliases: ['Trash', 'Deleted Items', 'Deleted', 'Deleted Messages', '[Gmail]/Trash', '[Google Mail]/Trash', '已删除'] },
 ];
 
 interface MailNotification {
@@ -72,18 +72,22 @@ export const useMailStore = defineStore('mail', () => {
       'Sent Messages': '已发送',
       'Sent Items': '已发送',
       '[Gmail]/Sent Mail': '已发送',
+      '[Google Mail]/Sent Mail': '已发送',
       Drafts: '草稿箱',
       '[Gmail]/Drafts': '草稿箱',
+      '[Google Mail]/Drafts': '草稿箱',
       Junk: '垃圾邮件',
       'Junk Email': '垃圾邮件',
       Spam: '垃圾邮件',
       '[Gmail]/Spam': '垃圾邮件',
+      '[Google Mail]/Spam': '垃圾邮件',
       Trash: '已删除',
       Deleted: '已删除',
       'Deleted Items': '已删除',
       'Deleted Messages': '已删除',
       '已删除': '已删除',
       '[Gmail]/Trash': '已删除',
+      '[Google Mail]/Trash': '已删除',
       '[Gmail]/Starred': '已加星标',
       '[Gmail]/Important': '重要邮件',
       '[Gmail]/All Mail': '所有邮件',
@@ -320,7 +324,7 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
-  function setComposeDraft(draft: { to?: string[]; cc?: string[]; subject?: string; body_html?: string; in_reply_to?: string; account_id?: string }) {
+  function setComposeDraft(draft: { to?: string[]; cc?: string[]; bcc?: string[]; subject?: string; body_html?: string; in_reply_to?: string; account_id?: string }) {
     composeDraft.value = draft;
   }
 

@@ -16,6 +16,7 @@ export interface Message {
   id: string
   uid?: number
   from_addr: string
+  to_addr?: string
   subject: string
   date: string
   is_read: boolean

@@ -322,13 +322,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import api from '../utils/api';
 import { useMailStore } from '../stores/mail';
 import TiptapEditor from '../components/TiptapEditor.vue';
 
 const emit = defineEmits<{
   discard: [];
+  sent: [];
 }>();
 
 const mailStore = useMailStore();
@@ -631,41 +632,50 @@ async function deleteEditingUserSig() {
   } catch (e: any) { console.error('删除签名失败:', e); }
 }
 
-// 初始化：选择第一个账号，加载签名，消费草稿数据
-onMounted(async () => {
-  // 消费回复/转发草稿数据
-  const draft = mailStore.consumeComposeDraft();
-  if (draft) {
-    toList.value = draft.to || [];
-    ccList.value = draft.cc || [];
-    subject.value = draft.subject || '';
-    bodyHtml.value = draft.body_html || '';
-    if (draft.account_id) fromAccountId.value = draft.account_id;
-    if (ccList.value.length > 0) showCc.value = true;
-    if (bccList.value.length > 0) showBcc.value = true;
-  }
-
-  if (!fromAccountId.value && accounts.value.length > 0) {
-    fromAccountId.value = accounts.value[0].id;
-  }
-
-  // 加载默认签名（草稿数据已有正文时不再插入签名）
-  if (!draft?.body_html) {
-    try {
-      const data = await api.get('/signatures') as any;
-      // 找到 is_default=1 的签名模板
-      const defaultSig = data.signatures?.find((s: any) => s.is_default);
-      if (defaultSig?.content_html) {
-        bodyHtml.value = '<p><br></p>' + defaultSig.content_html;
-      }
-    } catch {
-      // 签名加载失败不影响写邮件
+async function loadDefaultSignatureIfEmpty() {
+  if (bodyHtml.value) return;
+  try {
+    const data = await api.get('/signatures') as any;
+    // 找到 is_default=1 的签名模板
+    const defaultSig = data.signatures?.find((s: any) => s.is_default);
+    if (defaultSig?.content_html) {
+      bodyHtml.value = '<p><br></p>' + defaultSig.content_html;
     }
+  } catch {
+    // 签名加载失败不影响写邮件
   }
+}
 
+async function applyComposeDraft(draft: any = null) {
+  clearComposeForm();
+  toList.value = draft?.to || [];
+  ccList.value = draft?.cc || [];
+  bccList.value = draft?.bcc || [];
+  subject.value = draft?.subject || '';
+  bodyHtml.value = draft?.body_html || '';
+  fromAccountId.value = draft?.account_id || mailStore.currentAccountId || accounts.value[0]?.id || '';
+  showCc.value = ccList.value.length > 0;
+  showBcc.value = bccList.value.length > 0;
+  if (!draft?.body_html) {
+    await loadDefaultSignatureIfEmpty();
+  }
+}
+
+// 初始化：选择当前账号，加载签名，消费草稿数据
+onMounted(async () => {
+  await applyComposeDraft(mailStore.consumeComposeDraft());
   // 加载用户自定义签名列表（用于签名面板）
   loadUserSigs();
 });
+
+watch(
+  () => mailStore.composeDraft,
+  async (draft) => {
+    if (draft) {
+      await applyComposeDraft(mailStore.consumeComposeDraft());
+    }
+  },
+);
 
 // 添加收件人
 function addRecipient(field: 'to' | 'cc' | 'bcc') {
@@ -726,6 +736,7 @@ async function sendMail() {
     }) as any;
     showToast('发送成功', 'success');
     clearComposeForm();
+    emit('sent');
   } catch (e: any) {
     showToast('发送失败: ' + getErrorMessage(e), 'error');
   } finally {

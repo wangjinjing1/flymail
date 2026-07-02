@@ -139,7 +139,10 @@ async def _resolve_remote_folder(receiver, folder: str) -> str:
         return requested
 
     for item in folders:
-        if _remote_folder_alias_key(item.path or item.name or "") == alias_key:
+        if (
+            _remote_folder_alias_key(item.path or "") == alias_key
+            or _remote_folder_alias_key(item.name or "") == alias_key
+        ):
             return item.path
     for alias in REMOTE_FOLDER_ALIAS_ORDER[alias_key]:
         alias_lower = alias.lower()

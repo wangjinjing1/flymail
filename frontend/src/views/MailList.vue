@@ -42,6 +42,12 @@
       <!-- 普通模式工具栏 -->
       <div v-if="!selectMode" class="list-toolbar">
         <div class="toolbar-left">
+          <button class="compose-entry-btn" @click="openCompose" title="写邮件">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14"/><path d="M5 12h14"/>
+            </svg>
+            <span>写邮件</span>
+          </button>
           <!-- 多选图标按钮 -->
           <button class="btn-icon" @click="enterSelectMode()" title="多选">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -358,14 +364,23 @@ const noReadStateFolder = computed(() => {
     'sent messages',
     'sent items',
     '[gmail]/sent mail',
+    '[google mail]/sent mail',
     'drafts',
     '[gmail]/drafts',
+    '[google mail]/drafts',
+    '草稿箱',
     'trash',
     'deleted',
     'deleted items',
     'deleted messages',
     '[gmail]/trash',
+    '[google mail]/trash',
   ].includes(folder);
+});
+const isDraftFolder = computed(() => {
+  const folder = (mailStore.currentFolder || '').toLowerCase();
+  const folderName = mailStore.currentFolderName;
+  return ['drafts', '[gmail]/drafts', '[google mail]/drafts', '草稿箱'].includes(folder) || folderName === '草稿箱';
 });
 const currentFolderUnreadCount = computed(() => {
   const folder = mailStore.folders.find((item) => item.path === mailStore.currentFolder);
@@ -742,6 +757,17 @@ async function switchAccount(id: string) {
   await loadMessages();
 }
 
+function navigateToCompose() {
+  window.dispatchEvent(new CustomEvent('flymail-navigate', { detail: 'compose' }));
+}
+
+function openCompose() {
+  mailStore.setComposeDraft({
+    account_id: mailStore.currentAccountId,
+  });
+  navigateToCompose();
+}
+
 async function refreshLatestPage() {
   if (syncing.value || rebuilding.value || !mailStore.currentAccountId) return;
   syncing.value = true;
@@ -887,6 +913,27 @@ async function loadMessages() {
 async function selectMessage(msg: Message) {
   const version = ++loadVersion;
 
+  if (isDraftFolder.value) {
+    try {
+      const params: Record<string, string> = { folder: mailStore.currentFolder };
+      if (mailStore.currentAccountId) params.account_id = mailStore.currentAccountId;
+      const data = await api.get(`/messages/${msg.id}`, { params }) as any;
+      if (version !== loadVersion) return;
+      mailStore.setComposeDraft({
+        to: parseAddressList(data.to_addr || msg.to_addr || ''),
+        subject: data.subject || msg.subject || '',
+        body_html: data.body_html || data.body_text || '',
+        account_id: mailStore.currentAccountId,
+      });
+      navigateToCompose();
+    } catch (e) {
+      if (version !== loadVersion) return;
+      console.error('加载草稿失败:', e);
+      uiStore.error('加载草稿失败');
+    }
+    return;
+  }
+
   // 乐观 UI：立即用摘要数据渲染头部，正文留空显示骨架屏
   selectedMessage.value = {
     ...msg,
@@ -983,8 +1030,7 @@ function replyMessage() {
     account_id: mailStore.currentAccountId,
   });
   // 通过 App.vue 的 currentView 切换到 compose
-  const event = new CustomEvent('flymail-navigate', { detail: 'compose' });
-  window.dispatchEvent(event);
+  navigateToCompose();
 }
 
 /** 转发邮件：预填主题+引用原文，收件人留空，跳转到写邮件 */
@@ -999,8 +1045,14 @@ function forwardMessage() {
     body_html: fwdHtml,
     account_id: mailStore.currentAccountId,
   });
-  const event = new CustomEvent('flymail-navigate', { detail: 'compose' });
-  window.dispatchEvent(event);
+  navigateToCompose();
+}
+
+function parseAddressList(value: string): string[] {
+  return String(value || '')
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 // 悬停预取：鼠标悬停时静默预取邮件正文，点击时大概率已缓存
@@ -1317,6 +1369,11 @@ function downloadAttachment(att: Attachment) {
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-secondary);
   flex-shrink: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  -webkit-overflow-scrolling: touch;
 }
 
 .account-tab {
@@ -1333,6 +1390,8 @@ function downloadAttachment(att: Attachment) {
   font-size: var(--text-xs);
   font-family: inherit;
   white-space: nowrap;
+  min-width: 0;
+  max-width: 220px;
 }
 
 .account-tab:hover {
@@ -1350,6 +1409,8 @@ function downloadAttachment(att: Attachment) {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .btn-reauth {
@@ -1395,6 +1456,8 @@ function downloadAttachment(att: Attachment) {
 .account-email {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 /* ==================== 邮件列表 ==================== */
@@ -2572,6 +2635,28 @@ function downloadAttachment(att: Attachment) {
     overflow-wrap: anywhere;
     word-break: break-word;
   }
+}
+
+.compose-entry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.compose-entry-btn:hover {
+  opacity: 0.9;
 }
 
 /* 骨架屏：正文加载中的占位动画 */

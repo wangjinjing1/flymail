@@ -31,6 +31,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "outlook_client_id": "",
     "outlook_client_secret": "",
     "outlook_redirect_uri": "",
+    "uploads_cleanup_weekday": 0,
+    "uploads_cleanup_time": "02:00",
 }
 
 

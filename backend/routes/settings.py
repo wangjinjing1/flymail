@@ -167,6 +167,16 @@ def _latest_job_by_account(jobs: list[dict], job_type: str) -> dict[str, dict]:
     return result
 
 
+def _valid_cleanup_time(value: str) -> bool:
+    try:
+        hour_text, minute_text = str(value or "").split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        return 0 <= hour <= 23 and 0 <= minute <= 59
+    except (TypeError, ValueError):
+        return False
+
+
 async def _find_user_account(request: Request, account_id: str):
     uid = await get_uid(request)
     accounts = await get_accounts(uid)
@@ -199,6 +209,8 @@ async def get_settings():
         "outlook_client_secret": masked_outlook_secret if outlook_secret else "",
         "outlook_redirect_uri": settings.get("outlook_redirect_uri", ""),
         "has_outlook_credentials": bool(settings.get("outlook_client_id")) and bool(settings.get("outlook_client_secret")),
+        "uploads_cleanup_weekday": int(settings.get("uploads_cleanup_weekday", 0) or 0),
+        "uploads_cleanup_time": settings.get("uploads_cleanup_time", "02:00"),
     }
 
 
@@ -221,9 +233,15 @@ async def update_settings(body: SettingsUpdateRequest):
     if not outlook_secret_in_body or "*" in str(outlook_secret_in_body):
         update_data.pop("outlook_client_secret", None)
 
+    if "uploads_cleanup_time" in update_data and not _valid_cleanup_time(update_data["uploads_cleanup_time"]):
+        update_data["uploads_cleanup_time"] = "02:00"
+
     saved = await async_save_settings(update_data)
     sync_gmail_config(saved)
     sync_outlook_config(saved)
+    if "uploads_cleanup_weekday" in update_data or "uploads_cleanup_time" in update_data:
+        from services.upload_cleanup import restart_upload_cleanup
+        await restart_upload_cleanup()
 
     return {"success": True, "message": "设置已保存"}
 

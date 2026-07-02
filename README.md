@@ -141,14 +141,13 @@ docker push wangjinjing/flymail:1.0.0
 
 ### 本地 `data/` 目录
 
-文件类数据保存在本地 `data/` 目录，适合直接映射到 Docker volume。当前按类型拆分为子目录：
+文件类数据保存在本地 `data/` 目录，适合直接映射到 Docker volume。当前按用途拆分为子目录：
 
-- `data/uploads/`: 写信时上传的临时附件
-- `data/document/`: 历史邮件关联的非图片附件
-- `data/picture/`: 历史邮件图片与内嵌图片
+- `data/files/uploads/`: 写信时上传的临时附件，默认每周一 02:00 自动清理，可在设置页修改
+- `data/files/download/`: 历史邮件附件、图片与内嵌图片
 - `data/logs/`: 运行日志
 
-附件与图片会按邮件年月继续分目录，便于本地直接查看和归档。
+附件会按邮件年月继续分目录，便于本地直接查看和归档。
 
 ## 历史邮件同步
 

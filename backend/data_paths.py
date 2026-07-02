@@ -1,6 +1,5 @@
 import os
 import re
-import shutil
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -16,22 +15,9 @@ def _resolve_base_dir() -> Path:
 BASE_DATA_DIR = _resolve_base_dir()
 CONFIG_DIR = BASE_DATA_DIR / "config"
 LOGS_DIR = BASE_DATA_DIR / "logs"
-UPLOADS_DIR = BASE_DATA_DIR / "uploads"
-DOCUMENTS_DIR = BASE_DATA_DIR / "document"
-PICTURES_DIR = BASE_DATA_DIR / "picture"
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".svg",
-    ".heic",
-    ".heif",
-}
+FILES_DIR = BASE_DATA_DIR / "files"
+DOWNLOADS_DIR = FILES_DIR / "download"
+UPLOADS_DIR = FILES_DIR / "uploads"
 
 
 def _slugify(value: str) -> str:
@@ -101,12 +87,6 @@ def get_message_storage_key(message_date: str, account_id: str, account_email: s
     return str(Path(get_account_storage_slug(account_id, account_email)) / f"{dt.year:04d}" / f"{dt.month:02d}" / str(uid))
 
 
-def is_picture_attachment(filename: str, content_type: str) -> bool:
-    if (content_type or "").lower().startswith("image/"):
-        return True
-    return Path(filename or "").suffix.lower() in IMAGE_EXTENSIONS
-
-
 def build_message_file_path(
     *,
     message_date: str,
@@ -120,37 +100,7 @@ def build_message_file_path(
 ) -> tuple[str, Path]:
     storage_key = get_message_storage_key(message_date, account_id, account_email, uid, fallback=fallback_message_date)
     safe_filename = _slugify(filename or f"part_{part_number}")
-    is_picture = is_picture_attachment(filename, content_type)
-    base_dir = PICTURES_DIR if is_picture else DOCUMENTS_DIR
-    return storage_key, base_dir / storage_key / f"{part_number}_{safe_filename}"
-
-
-def find_legacy_message_file(
-    *,
-    account_id: str,
-    account_email: str,
-    uid: int,
-    part_number: int,
-    filename: str,
-    content_type: str,
-) -> Path | None:
-    slug = get_account_storage_slug(account_id, account_email)
-    safe_filename = _slugify(filename or f"part_{part_number}")
-    candidate_name = f"{part_number}_{safe_filename}"
-    roots = [PICTURES_DIR, DOCUMENTS_DIR]
-    preferred_root = PICTURES_DIR if is_picture_attachment(filename, content_type) else DOCUMENTS_DIR
-    search_roots = [preferred_root] + [root for root in roots if root != preferred_root]
-
-    for root in search_roots:
-        account_root = root / slug
-        if not account_root.exists():
-            continue
-        direct_match = account_root.rglob(candidate_name)
-        for path in direct_match:
-            if path.is_file() and str(uid) in {path.parent.name, *(parent.name for parent in path.parents)}:
-                return path
-
-    return None
+    return storage_key, DOWNLOADS_DIR / storage_key / f"{part_number}_{safe_filename}"
 
 
 def ensure_message_file_location(
@@ -177,36 +127,13 @@ def ensure_message_file_location(
     )
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing = Path(current_path) if current_path else None
-    source_path = None
-    if existing and existing.exists() and existing.is_file():
-        source_path = existing
-    else:
-        source_path = find_legacy_message_file(
-            account_id=account_id,
-            account_email=account_email,
-            uid=uid,
-            part_number=part_number,
-            filename=filename,
-            content_type=content_type,
-        )
-
-    moved = False
-    if source_path and source_path.resolve() != target_path.resolve():
-        if not target_path.exists():
-            shutil.move(str(source_path), str(target_path))
-        moved = True
-    elif source_path and source_path.resolve() == target_path.resolve():
-        moved = False
-
-    return storage_key, target_path, moved
+    return storage_key, target_path, False
 
 
 def clear_account_storage(account_id: str, account_email: str = "") -> None:
     slug = get_account_storage_slug(account_id, account_email)
     cleanup_paths = [
-        DOCUMENTS_DIR / slug,
-        PICTURES_DIR / slug,
+        DOWNLOADS_DIR / slug,
     ]
     for target in cleanup_paths:
         if target.exists():
@@ -216,10 +143,10 @@ def clear_account_storage(account_id: str, account_email: str = "") -> None:
 def ensure_data_dirs() -> None:
     for path in (
         BASE_DATA_DIR,
+        FILES_DIR,
         CONFIG_DIR,
         LOGS_DIR,
         UPLOADS_DIR,
-        DOCUMENTS_DIR,
-        PICTURES_DIR,
+        DOWNLOADS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

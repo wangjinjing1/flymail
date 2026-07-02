@@ -225,6 +225,70 @@
       </transition>
     </div>
 
+    <div class="provider-card">
+      <div class="storage-card-body">
+        <div class="storage-heading">
+          <div>
+            <h3 class="storage-title">上传临时文件</h3>
+            <p class="storage-desc">写信上传的附件会暂存在 files/uploads，按下面时间自动清理。</p>
+          </div>
+        </div>
+
+        <div class="storage-fields">
+          <div class="field">
+            <label class="field-label">清理星期</label>
+            <div class="field-input">
+              <select v-model.number="form.uploads_cleanup_weekday" class="input">
+                <option v-for="day in cleanupWeekdays" :key="day.value" :value="day.value">
+                  {{ day.label }}
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label">清理时间</label>
+            <div class="field-input compact-input">
+              <input
+                v-model="form.uploads_cleanup_time"
+                class="input"
+                type="time"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="save-bar">
+          <button class="btn btn-primary btn-save" @click="saveSettings" :disabled="saving">
+            <svg v-if="!saving" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+            </svg>
+            <span v-if="saving" class="saving-text">
+              <span class="saving-dot"></span>
+              保存中...
+            </span>
+            <span v-else>保存设置</span>
+          </button>
+          <transition name="fade">
+            <span v-if="saveSuccess" class="status-msg success">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+              保存成功
+            </span>
+          </transition>
+          <transition name="fade">
+            <span v-if="saveError" class="status-msg error">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+              </svg>
+              {{ saveError }}
+            </span>
+          </transition>
+        </div>
+      </div>
+    </div>
+
     <!-- ==================== 配置教程（可折叠） ==================== -->
     <div class="guide-section">
       <!-- 折叠按钮 -->
@@ -572,6 +636,8 @@ function previewImage(src: string) {
 // ==================== 设置表单逻辑 ====================
 
 interface SettingsForm {
+  uploads_cleanup_weekday: number;
+  uploads_cleanup_time: string;
   gmail_client_id: string;
   gmail_client_secret: string;
   gmail_redirect_uri: string;
@@ -581,6 +647,8 @@ interface SettingsForm {
 }
 
 const form = ref<SettingsForm>({
+  uploads_cleanup_weekday: 0,
+  uploads_cleanup_time: '02:00',
   gmail_client_id: '',
   gmail_client_secret: '',
   gmail_redirect_uri: '',
@@ -588,6 +656,16 @@ const form = ref<SettingsForm>({
   outlook_client_secret: '',
   outlook_redirect_uri: '',
 });
+
+const cleanupWeekdays = [
+  { value: 0, label: '周一' },
+  { value: 1, label: '周二' },
+  { value: 2, label: '周三' },
+  { value: 3, label: '周四' },
+  { value: 4, label: '周五' },
+  { value: 5, label: '周六' },
+  { value: 6, label: '周日' },
+];
 
 const secretConfigured = ref(false);
 const outlookSecretConfigured = ref(false);
@@ -599,6 +677,8 @@ async function loadSettingsData() {
   try {
     const data = await api.get('/settings') as any;
     form.value = {
+      uploads_cleanup_weekday: Number(data.uploads_cleanup_weekday ?? 0),
+      uploads_cleanup_time: data.uploads_cleanup_time || '02:00',
       gmail_client_id: data.gmail_client_id || '',
       gmail_client_secret: '',
       gmail_redirect_uri: data.gmail_redirect_uri || '',
@@ -622,7 +702,9 @@ async function saveSettings() {
   saveSuccess.value = false;
   saveError.value = '';
   try {
-    const payload: Record<string, string> = {
+    const payload: Record<string, string | number> = {
+      uploads_cleanup_weekday: form.value.uploads_cleanup_weekday,
+      uploads_cleanup_time: form.value.uploads_cleanup_time || '02:00',
       gmail_client_id: form.value.gmail_client_id,
       gmail_redirect_uri: form.value.gmail_redirect_uri,
       outlook_client_id: form.value.outlook_client_id,
@@ -793,6 +875,43 @@ onMounted(() => {
   color: var(--text-tertiary);
   margin-top: 6px;
   line-height: 1.4;
+}
+
+.storage-card-body {
+  padding: var(--space-6);
+}
+
+.storage-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.storage-title {
+  margin: 0 0 4px;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.storage-desc {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
+
+.storage-fields {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(160px, 220px);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.compact-input {
+  max-width: 180px;
 }
 
 /* 保存操作栏 */
@@ -1185,6 +1304,14 @@ onMounted(() => {
 
   .card-body {
     padding: var(--space-4);
+  }
+
+  .storage-card-body {
+    padding: var(--space-4);
+  }
+
+  .storage-fields {
+    grid-template-columns: 1fr;
   }
 
   .save-bar {

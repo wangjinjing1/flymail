@@ -29,6 +29,7 @@ from routes.websocket import router as websocket_router
 from schemas import HealthResponse, UserResponse
 from services.settings import async_load_settings
 from services.sync import sync_service
+from services.upload_cleanup import start_upload_cleanup, stop_upload_cleanup
 from services.users import ensure_admin_user
 from utils.logger import get_logger, setup_logging
 from utils.proxy_env import apply_proxy_env
@@ -63,9 +64,11 @@ async def lifespan(app: FastAPI):
     from services.scheduler import start_scheduler
 
     start_scheduler()
+    start_upload_cleanup()
     logger.info("startup complete data_dir=%s", BASE_DATA_DIR)
     yield
     await sync_service._stop_all_idle()
+    await stop_upload_cleanup()
     from services.scheduler import shutdown_scheduler
 
     shutdown_scheduler()

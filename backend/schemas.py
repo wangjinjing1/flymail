@@ -15,6 +15,8 @@ class UserResponse(BaseModel):
 
 
 class SettingsResponse(BaseModel):
+    uploads_cleanup_weekday: int = Field(default=0, ge=0, le=6, description="Upload cleanup weekday, 0=Monday")
+    uploads_cleanup_time: str = Field(default="02:00", description="Upload cleanup time, HH:MM")
     gmail_client_id: str = Field(description="Gmail OAuth 客户端ID（完整）")
     gmail_client_secret: str = Field(description="Gmail OAuth 客户端密钥（脱敏，仅显示首尾4位）")
     gmail_redirect_uri: str = Field(description="Gmail OAuth 回调地址")
@@ -33,6 +35,8 @@ class SettingsUpdateResponse(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     """更新应用设置请求模型，所有字段可选。"""
 
+    uploads_cleanup_weekday: Optional[int] = Field(default=None, ge=0, le=6, description="Upload cleanup weekday, 0=Monday")
+    uploads_cleanup_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$", description="Upload cleanup time, HH:MM")
     gmail_client_id: Optional[str] = Field(default=None, max_length=500, description="Gmail OAuth 客户端ID")
     gmail_client_secret: Optional[str] = Field(default=None, max_length=500, description="Gmail OAuth 客户端密钥")
     gmail_redirect_uri: Optional[str] = Field(default=None, max_length=500, description="Gmail OAuth 回调地址")

@@ -5,8 +5,7 @@ import uuid
 from pathlib import Path
 
 from data_paths import (
-    DOCUMENTS_DIR,
-    PICTURES_DIR,
+    DOWNLOADS_DIR,
     build_message_file_path,
     coalesce_message_date,
     clear_account_storage,
@@ -305,12 +304,11 @@ async def retry_history_sync(account_id: str) -> bool:
 async def _account_local_cache_files(account_id: str, account_email: str) -> list[Path]:
     files: dict[str, Path] = {}
     slug = account_email or account_id
-    for root in (DOCUMENTS_DIR, PICTURES_DIR):
-        account_root = root / slug
-        if account_root.exists():
-            for path in account_root.rglob("*"):
-                if path.is_file():
-                    files[str(path)] = path
+    account_root = DOWNLOADS_DIR / slug
+    if account_root.exists():
+        for path in account_root.rglob("*"):
+            if path.is_file():
+                files[str(path)] = path
     for item in await get_cached_attachment_rows(account_id):
         local_path = item.get("local_path") or ""
         if local_path:
@@ -385,10 +383,8 @@ async def run_clear_cache(account_id: str) -> None:
 
         removed_files = 0
         slug = account.email or account.id
-        for root in (DOCUMENTS_DIR, PICTURES_DIR):
-            account_root = root / slug
-            if not account_root.exists():
-                continue
+        account_root = DOWNLOADS_DIR / slug
+        if account_root.exists():
             file_paths = [path for path in account_root.rglob("*") if path.is_file()]
             for path in file_paths:
                 try:

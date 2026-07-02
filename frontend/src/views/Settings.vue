@@ -8,6 +8,69 @@
       </button>
     </div>
 
+    <div class="provider-card">
+      <div class="storage-card-body">
+        <div class="storage-heading">
+          <div>
+            <h3 class="storage-title">定时清理上传临时文件时间</h3>
+          </div>
+        </div>
+
+        <div class="storage-fields">
+          <div class="field">
+            <label class="field-label">清理星期</label>
+            <div class="field-input">
+              <select v-model.number="form.uploads_cleanup_weekday" class="input">
+                <option v-for="day in cleanupWeekdays" :key="day.value" :value="day.value">
+                  {{ day.label }}
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label">清理时间</label>
+            <div class="field-input compact-input">
+              <input
+                v-model="form.uploads_cleanup_time"
+                class="input"
+                type="time"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="save-bar">
+          <button class="btn btn-primary btn-save" @click="saveSettings" :disabled="saving">
+            <svg v-if="!saving" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+            </svg>
+            <span v-if="saving" class="saving-text">
+              <span class="saving-dot"></span>
+              保存中...
+            </span>
+            <span v-else>保存设置</span>
+          </button>
+          <transition name="fade">
+            <span v-if="saveSuccess" class="status-msg success">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+              保存成功
+            </span>
+          </transition>
+          <transition name="fade">
+            <span v-if="saveError" class="status-msg error">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+              </svg>
+              {{ saveError }}
+            </span>
+          </transition>
+        </div>
+      </div>
+    </div>
+
     <!-- Gmail 配置卡片（可折叠） -->
     <div class="provider-card">
       <!-- 折叠按钮 - 带红色渐变背景 -->
@@ -231,70 +294,6 @@
           </div>
         </div>
       </transition>
-    </div>
-
-    <div class="provider-card">
-      <div class="storage-card-body">
-        <div class="storage-heading">
-          <div>
-            <h3 class="storage-title">上传临时文件</h3>
-            <p class="storage-desc">写信上传的附件会暂存在 files/uploads，按下面时间自动清理。</p>
-          </div>
-        </div>
-
-        <div class="storage-fields">
-          <div class="field">
-            <label class="field-label">清理星期</label>
-            <div class="field-input">
-              <select v-model.number="form.uploads_cleanup_weekday" class="input">
-                <option v-for="day in cleanupWeekdays" :key="day.value" :value="day.value">
-                  {{ day.label }}
-                </option>
-              </select>
-            </div>
-          </div>
-
-          <div class="field">
-            <label class="field-label">清理时间</label>
-            <div class="field-input compact-input">
-              <input
-                v-model="form.uploads_cleanup_time"
-                class="input"
-                type="time"
-              />
-            </div>
-          </div>
-        </div>
-
-        <div class="save-bar">
-          <button class="btn btn-primary btn-save" @click="saveSettings" :disabled="saving">
-            <svg v-if="!saving" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
-            </svg>
-            <span v-if="saving" class="saving-text">
-              <span class="saving-dot"></span>
-              保存中...
-            </span>
-            <span v-else>保存设置</span>
-          </button>
-          <transition name="fade">
-            <span v-if="saveSuccess" class="status-msg success">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
-              保存成功
-            </span>
-          </transition>
-          <transition name="fade">
-            <span v-if="saveError" class="status-msg error">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
-              </svg>
-              {{ saveError }}
-            </span>
-          </transition>
-        </div>
-      </div>
     </div>
 
     <!-- ==================== 配置教程（可折叠） ==================== -->

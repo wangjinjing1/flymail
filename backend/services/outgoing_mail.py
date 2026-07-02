@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import urllib.parse
 from email import encoders
 from email.mime.base import MIMEBase
@@ -8,7 +9,8 @@ from email.mime.text import MIMEText
 from email.utils import formatdate
 
 from models import Account
-from db import search_cached_messages_by_folder
+from models import CachedMessage
+from db import get_folder_stats, search_cached_messages_by_folder, upsert_cached_messages, upsert_folder_stats
 from providers.factory import ProviderFactory
 from services.mail_cache import sync_folder_to_cache
 from services.sync import sync_service
@@ -68,6 +70,41 @@ def build_outgoing_message_bytes(
         msg.attach(part)
 
     return msg.as_bytes()
+
+
+async def _cache_outgoing_message_locally(
+    account: Account,
+    user_uid: str,
+    sent_folder: str,
+    to: list[str],
+    cc: list[str],
+    bcc: list[str],
+    subject: str,
+    body_html: str,
+    attachments: list[str],
+) -> None:
+    local_uid = -int(time.time() * 1000)
+    await upsert_cached_messages([
+        CachedMessage(
+            id=f"{account.id}_{local_uid}",
+            account_id=account.id,
+            user_uid=user_uid,
+            uid=local_uid,
+            folder=sent_folder,
+            subject=subject or "",
+            from_addr=account.email,
+            to_addr=", ".join((to or []) + (cc or []) + (bcc or [])),
+            date=formatdate(localtime=True),
+            is_read=True,
+            has_attachments=bool(attachments),
+            body_text=_html_to_text(body_html or ""),
+            body_html=body_html or "",
+            cached_at=time.time(),
+        )
+    ])
+    stats = await get_folder_stats(account.id, sent_folder)
+    total = max(0, int(stats.get("total_count", 0) or 0)) + 1
+    await upsert_folder_stats(account.id, sent_folder, total, 0)
 
 
 async def find_special_folder(account: Account, folder_type: str) -> str:
@@ -163,6 +200,17 @@ async def ensure_sent_message_cached(
                     pass
         except Exception as exc:
             logger.warning("append sent message fallback failed: %s", exc)
+            await _cache_outgoing_message_locally(
+                account=account,
+                user_uid=user_uid,
+                sent_folder=sent_folder,
+                to=to or [],
+                cc=cc or [],
+                bcc=bcc or [],
+                subject=subject or "",
+                body_html=body_html or "",
+                attachments=attachments or [],
+            )
 
     try:
         receiver = ProviderFactory.get_receiver(account.provider)

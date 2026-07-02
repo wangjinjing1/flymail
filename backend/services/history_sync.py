@@ -144,10 +144,10 @@ CORE_HISTORY_FOLDERS = {
 
 CORE_HISTORY_FOLDER_ALIASES = {
     "INBOX": {"INBOX", "Inbox"},
-    "Sent": {"Sent", "Sent Messages", "Sent Items", "[Gmail]/Sent Mail"},
-    "Drafts": {"Drafts", "[Gmail]/Drafts"},
-    "Junk": {"Junk", "Junk Email", "Spam", "[Gmail]/Spam"},
-    "Trash": {"Trash", "Deleted", "Deleted Items", "Deleted Messages", "[Gmail]/Trash", "已删除"},
+    "Sent": {"Sent", "Sent Mail", "Sent Messages", "Sent Items", "[Gmail]/Sent Mail", "[Google Mail]/Sent Mail", "已发送"},
+    "Drafts": {"Drafts", "[Gmail]/Drafts", "[Google Mail]/Drafts", "草稿箱"},
+    "Junk": {"Junk", "Junk Email", "Spam", "[Gmail]/Spam", "[Google Mail]/Spam", "垃圾邮件"},
+    "Trash": {"Trash", "Deleted", "Deleted Items", "Deleted Messages", "[Gmail]/Trash", "[Google Mail]/Trash", "已删除"},
 }
 
 
@@ -186,9 +186,9 @@ def _resolve_history_folders(remote_folders: list, wanted_folders: list[str] | N
         match = next(
             (
                 folder for folder in remote_folders
-                if history_folder_matches(
-                    getattr(folder, "path", "") or getattr(folder, "name", "") or "INBOX",
-                    wanted_folder,
+                if (
+                    history_folder_matches(getattr(folder, "path", "") or "INBOX", wanted_folder)
+                    or history_folder_matches(getattr(folder, "name", "") or "", wanted_folder)
                 )
             ),
             None,

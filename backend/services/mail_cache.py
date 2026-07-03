@@ -68,6 +68,21 @@ def _select_uncached_recent_messages(messages: List[Message], cached_uids: set[i
     return selected, False
 
 
+async def _sync_read_state_from_unseen(account: Account, folder: str, messages: List[Message], unseen_uids: set[int] | None) -> int:
+    if unseen_uids is None:
+        return 0
+    to_fix = []
+    for message in messages:
+        if message.uid <= 0:
+            continue
+        should_read = message.uid not in unseen_uids
+        message.is_read = should_read
+        to_fix.append((message.uid, 1 if should_read else 0))
+    if not to_fix:
+        return 0
+    return await batch_update_is_read(account.id, folder, to_fix)
+
+
 REMOTE_FOLDER_ALIAS_ORDER = {
     "inbox": ["INBOX", "Inbox"],
     "sent": ["Sent Messages", "Sent Items", "[Gmail]/Sent Mail", "[Google Mail]/Sent Mail", "Sent", "Sent Mail", "已发送"],
@@ -178,6 +193,7 @@ async def sync_recent_folder_to_cache(account: Account, folder: str = "INBOX", p
             if not result.messages:
                 break
 
+            await _sync_read_state_from_unseen(account, folder, result.messages, unseen_uids)
             new_messages, reached_cached = _select_uncached_recent_messages(result.messages, cached_uids)
             if new_messages:
                 added += await _cache_messages_with_details(receiver, account, folder, new_messages, unseen_uids)
@@ -437,10 +453,19 @@ async def _do_sync(receiver, account: Account, folder: str, force_full: bool = F
         if purged > 0:
             logger.info("清理过期缓存: 账号=%s, 文件夹=%s, 删除 %d 封", account.email, folder, purged)
 
+    filled_missing = 0
+    if not force_full and total_count > 0:
+        try:
+            cached_count = await get_cached_count(account.id, folder)
+            if cached_count < total_count:
+                filled_missing = await _sync_missing_messages_with_receiver(receiver, account, folder)
+        except Exception as e:
+            logger.debug("补全缺失缓存失败: %s", e)
+
     if total_count >= 0:
         await upsert_folder_stats(account.id, folder, total_count, unread_count)
 
-    return len(messages) if messages else 0
+    return (len(messages) if messages else 0) + filled_missing
 
 
 async def _cache_messages_with_details(receiver, account: Account, folder: str, messages: List[Message], unseen_uids: set[int] | None) -> int:
@@ -464,6 +489,9 @@ async def _cache_messages_with_details(receiver, account: Account, folder: str, 
         except Exception as e:
             logger.debug("拉取邮件详情失败，跳过附件缓存: account=%s folder=%s uid=%s error=%s", account.email, folder, message.uid, e)
             continue
+
+        if unseen_uids is not None:
+            detail.is_read = detail.uid not in unseen_uids
 
         cached_detail = await get_cached_message_detail(account.id, detail.uid, folder)
         effective_message_date = coalesce_message_date(detail.date, message.date, (cached_detail or {}).get("date", ""))
@@ -498,6 +526,47 @@ async def _cache_messages_with_details(receiver, account: Account, folder: str, 
     if detailed_batch:
         await upsert_cached_messages(detailed_batch)
     return len(messages)
+
+
+async def _sync_missing_messages_with_receiver(receiver, account: Account, folder: str) -> int:
+    try:
+        imap_uids = set(await receiver.fetch_new_message_uids(folder, since_uid=0))
+    except Exception as e:
+        logger.warning("获取 IMAP UID 列表失败: %s, %s", folder, e)
+        return 0
+
+    if not imap_uids:
+        return 0
+
+    cached_uids = await get_cached_uids(account.id, folder)
+    missing_uids = imap_uids - cached_uids
+    if not missing_uids:
+        return 0
+
+    logger.info(
+        "补全同步: 账号=%s, 文件夹=%s, IMAP=%d封, 缓存=%d封, 缺失=%d封",
+        account.email, folder, len(imap_uids), len(cached_uids), len(missing_uids)
+    )
+
+    total_filled = 0
+    missing_list = sorted(missing_uids)
+    unseen_uids = None
+    try:
+        unseen_uids = set(await receiver.fetch_unseen_uids(folder))
+    except Exception as e:
+        logger.debug("获取未读 uid 列表失败，跳过 is_read 校正: %s", e)
+
+    for i in range(0, len(missing_list), 100):
+        batch = missing_list[i:i + 100]
+        try:
+            messages = await receiver.fetch_messages_by_uids(folder, batch)
+            messages = [m for m in messages if m.uid > 0]
+            if messages:
+                total_filled += await _cache_messages_with_details(receiver, account, folder, messages, unseen_uids)
+        except Exception as e:
+            logger.warning("补全同步批次失败: %s, UIDs=%s, 错误=%s", folder, batch[:5], e)
+
+    return total_filled
 
 
 async def sync_missing_messages(account: Account, folder: str) -> int:

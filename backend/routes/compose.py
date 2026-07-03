@@ -5,7 +5,6 @@
 - 发送邮件
 - 写邮件统一入口（发送/草稿/定时发送）
 """
-import asyncio
 import uuid
 from datetime import datetime
 from services.scheduler import LOCAL_TIMEZONE
@@ -55,9 +54,9 @@ async def _cache_sent_message_after_send(
     body_html: str,
     attachments: list[str],
     in_reply_to: str | None,
-) -> None:
+) -> str:
     try:
-        await ensure_sent_message_cached(
+        return await ensure_sent_message_cached(
             account=account,
             user_uid=user_uid,
             to=to,
@@ -70,6 +69,7 @@ async def _cache_sent_message_after_send(
         )
     except Exception as exc:
         logger.warning("发送成功后缓存已发送邮件失败: %s", exc)
+        return ""
 
 
 
@@ -132,6 +132,17 @@ async def send_message(request: Request, body: SendMessageRequest = Body(descrip
                 logger.debug("断开发送连接失败: %s", e)
 
         if result.success:
+            await _cache_sent_message_after_send(
+                account=account,
+                user_uid=user_uid,
+                to=[body.to],
+                cc=[],
+                bcc=[],
+                subject=body.subject,
+                body_html=body.content if body.html else body.content.replace("\n", "<br>"),
+                attachments=[],
+                in_reply_to=None,
+            )
             return {"success": True, "message": "邮件发送成功"}
         else:
             raise AppError(500, result.error)
@@ -241,7 +252,7 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 logger.debug("断开发送连接失败: %s", e)
 
         if result.success:
-            asyncio.create_task(_cache_sent_message_after_send(
+            sent_folder = await _cache_sent_message_after_send(
                 account=account,
                 user_uid=user_uid,
                 to=body.to,
@@ -251,8 +262,8 @@ async def compose_message(request: Request, body: ComposeMessageRequest):
                 body_html=body.body_html,
                 attachments=body.attachments or [],
                 in_reply_to=body.in_reply_to,
-            ))
-            return {"success": True, "message": "发送成功", "sent_folder": ""}
+            )
+            return {"success": True, "message": "发送成功", "sent_folder": sent_folder}
         else:
             raise AppError(500, result.error)
     except Exception as e:

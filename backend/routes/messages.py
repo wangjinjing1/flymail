@@ -12,6 +12,7 @@ from data_paths import UPLOADS_DIR, coalesce_message_date, ensure_data_dirs, ens
 from db import (
     adjust_account_folder_unread,
     batch_delete_cached_messages,
+    batch_update_is_read,
     batch_update_cached_messages_read,
     get_accounts,
     get_cached_attachment,
@@ -235,6 +236,11 @@ async def _cache_remote_page(account: Account, folder: str, result: MessageList)
         if result.messages:
             cached_messages = _messages_to_cached(result.messages, account)
             await upsert_cached_messages(cached_messages)
+            await batch_update_is_read(
+                account.id,
+                folder,
+                [(message.uid, 1 if message.is_read else 0) for message in result.messages if message.uid > 0],
+            )
         await upsert_folder_stats(account.id, folder, result.total, result.unread_total)
     finally:
         lock.release()
@@ -397,6 +403,11 @@ async def _adjust_folder_unread_stats(account_id: str, folder: str, delta: int) 
     total = int(stats.get("total_count", 0) or 0)
     unread = max(0, int(stats.get("unread_count", 0) or 0) + int(delta or 0))
     await upsert_folder_stats(account_id, folder, total, unread)
+
+
+async def _remote_message_is_read(receiver, folder: str, uid_num: int) -> bool:
+    unseen_uids = set(await receiver.fetch_unseen_uids(folder))
+    return uid_num not in unseen_uids
 
 
 async def _fetch_remote_folder_counts(
@@ -1168,7 +1179,11 @@ async def mark_message_as_read(
             await receiver.connect(credentials)
             try:
                 remote_folder = await _resolve_remote_folder(receiver, body.folder)
-                await receiver.mark_as_read(uid_str, folder=remote_folder)
+                try:
+                    await receiver.mark_as_read(uid_str, folder=remote_folder)
+                except Exception:
+                    if not await _remote_message_is_read(receiver, remote_folder, uid_num):
+                        raise
             finally:
                 await _safe_disconnect(receiver)
         except Exception as exc:

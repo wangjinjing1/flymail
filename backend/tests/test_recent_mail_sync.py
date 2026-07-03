@@ -147,6 +147,88 @@ class RecentMailSyncAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added, 2)
         self.assertEqual(receiver.fetch_messages.await_count, 1)
 
+    async def test_recent_sync_updates_read_state_for_cached_message_before_stopping(self):
+        mail_cache = _load_mail_cache_module()
+        account = Account(
+            id="account-1",
+            user_uid="user-1",
+            email="user@example.com",
+            provider="gmail",
+        )
+        receiver = AsyncMock()
+        receiver.fetch_messages.return_value = MessageList(
+            messages=[_message(105), _message(104), _message(103)],
+            total=6,
+            unread_total=1,
+            page=1,
+            page_size=3,
+        )
+        receiver.fetch_unseen_uids.return_value = [104]
+        receiver.fetch_message_detail.side_effect = lambda uid, folder="INBOX": _message(int(uid))
+        receiver.disconnect = AsyncMock()
+        token_stub = types.ModuleType("services.token")
+        token_stub.ensure_token = AsyncMock(return_value=object())
+        batch_update = AsyncMock()
+
+        with (
+            patch.dict(sys.modules, {"services.token": token_stub}),
+            patch.object(mail_cache, "ProviderFactory") as factory,
+            patch.object(mail_cache, "get_cached_uids", AsyncMock(return_value={103, 102})),
+            patch.object(mail_cache, "upsert_folder_stats", AsyncMock()),
+            patch.object(mail_cache, "upsert_cached_messages", AsyncMock()),
+            patch.object(mail_cache, "batch_update_is_read", batch_update),
+            patch.object(mail_cache, "get_cached_message_detail", AsyncMock(return_value=None)),
+            patch.object(mail_cache, "_cache_message_assets", AsyncMock(return_value=("", "", 0, 0, []))),
+            patch.object(mail_cache, "upsert_cached_attachments", AsyncMock()),
+        ):
+            factory.get_receiver.return_value = receiver
+            added = await mail_cache.sync_recent_folder_to_cache(account, "INBOX", page_size=3)
+
+        self.assertEqual(added, 2)
+        batch_update.assert_any_await("account-1", "INBOX", [(105, 1), (104, 0), (103, 1)])
+
+    async def test_recent_sync_uses_unseen_state_when_caching_detail(self):
+        mail_cache = _load_mail_cache_module()
+        account = Account(
+            id="account-1",
+            user_uid="user-1",
+            email="user@example.com",
+            provider="gmail",
+        )
+        receiver = AsyncMock()
+        receiver.fetch_messages.return_value = MessageList(
+            messages=[_message(105)],
+            total=1,
+            unread_total=0,
+            page=1,
+            page_size=3,
+        )
+        receiver.fetch_unseen_uids.return_value = []
+        stale_detail = _message(105)
+        stale_detail.is_read = False
+        receiver.fetch_message_detail.return_value = stale_detail
+        receiver.disconnect = AsyncMock()
+        token_stub = types.ModuleType("services.token")
+        token_stub.ensure_token = AsyncMock(return_value=object())
+        upsert = AsyncMock()
+
+        with (
+            patch.dict(sys.modules, {"services.token": token_stub}),
+            patch.object(mail_cache, "ProviderFactory") as factory,
+            patch.object(mail_cache, "get_cached_uids", AsyncMock(return_value=set())),
+            patch.object(mail_cache, "upsert_folder_stats", AsyncMock()),
+            patch.object(mail_cache, "upsert_cached_messages", upsert),
+            patch.object(mail_cache, "batch_update_is_read", AsyncMock()),
+            patch.object(mail_cache, "get_cached_message_detail", AsyncMock(return_value=None)),
+            patch.object(mail_cache, "_cache_message_assets", AsyncMock(return_value=("", "", 0, 0, []))),
+            patch.object(mail_cache, "upsert_cached_attachments", AsyncMock()),
+        ):
+            factory.get_receiver.return_value = receiver
+            await mail_cache.sync_recent_folder_to_cache(account, "INBOX", page_size=3)
+
+        detailed_batch = upsert.await_args_list[-1].args[0]
+        self.assertTrue(detailed_batch[0].is_read)
+
     async def test_recent_sync_fetches_next_page_only_when_current_page_is_all_new(self):
         mail_cache = _load_mail_cache_module()
         account = Account(
@@ -257,6 +339,33 @@ class RecentMailSyncAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added, 0)
         token_stub.ensure_token.assert_not_awaited()
         factory.get_receiver.assert_not_called()
+
+    async def test_incremental_sync_fills_missing_when_remote_total_exceeds_cache(self):
+        mail_cache = _load_mail_cache_module()
+        account = Account(
+            id="account-1",
+            user_uid="user-1",
+            email="user@example.com",
+            provider="qq",
+        )
+        receiver = AsyncMock()
+        receiver.fetch_new_message_uids.return_value = []
+        receiver.fetch_folder_counts.return_value = {"Sent Messages": {"total": 594, "unread": 0}}
+        receiver.fetch_unseen_uids.return_value = []
+
+        with (
+            patch.object(mail_cache, "_resolve_remote_folder", AsyncMock(return_value="Sent Messages")),
+            patch.object(mail_cache, "get_max_cached_uid", AsyncMock(return_value=9999)),
+            patch.object(mail_cache, "get_folder_stats", AsyncMock(return_value={"updated_at": 1, "total_count": 593})),
+            patch.object(mail_cache, "upsert_folder_stats", AsyncMock()),
+            patch.object(mail_cache, "get_cached_count", AsyncMock(return_value=593)),
+            patch.object(mail_cache, "get_cached_messages_by_folder", AsyncMock(return_value={"messages": []})),
+            patch.object(mail_cache, "_sync_missing_messages_with_receiver", AsyncMock(return_value=1)) as fill_missing,
+        ):
+            added = await mail_cache._do_sync(receiver, account, "Sent Messages")
+
+        self.assertEqual(added, 1)
+        fill_missing.assert_awaited_once_with(receiver, account, "Sent Messages")
 
 
 if __name__ == "__main__":

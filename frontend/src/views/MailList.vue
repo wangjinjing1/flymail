@@ -287,7 +287,7 @@
         </div>
 
         <div v-if="selectedMessage.body_html || selectedMessage.body_text" class="detail-content-wrap">
-          <div v-html="sanitizeHtml(selectedMessage.body_html) || selectedMessage.body_text" class="detail-content"></div>
+          <div v-html="renderMessageBody(selectedMessage)" class="detail-content"></div>
         </div>
         <!-- 正文加载中：显示骨架屏 -->
         <div v-else class="body-skeleton">
@@ -377,6 +377,39 @@ const noReadStateFolder = computed(() => {
     '[google mail]/trash',
   ].includes(folder);
 });
+function folderAliasKey(folder: string): string {
+  const value = (folder || '').toLowerCase();
+  if (['sent', 'sent messages', 'sent items', 'sent mail', '[gmail]/sent mail', '[google mail]/sent mail', '已发送'].includes(value)) return 'sent';
+  if (['drafts', '[gmail]/drafts', '[google mail]/drafts', '草稿箱'].includes(value)) return 'drafts';
+  if (['junk', 'junk email', 'spam', '[gmail]/spam', '[google mail]/spam', '垃圾邮件'].includes(value)) return 'junk';
+  if (['trash', 'deleted', 'deleted items', 'deleted messages', '[gmail]/trash', '[google mail]/trash', '已删除'].includes(value)) return 'trash';
+  if (['inbox', '收件箱'].includes(value)) return 'inbox';
+  return value;
+}
+function foldersMatchForRefresh(eventFolder: string, currentFolder: string): boolean {
+  if (!eventFolder || eventFolder === currentFolder) return true;
+  return folderAliasKey(eventFolder) === folderAliasKey(currentFolder);
+}
+
+function escapeHtml(text: string) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderPlainTextBody(text: string | undefined | null) {
+  if (!text) return '';
+  return escapeHtml(text).replace(/\r\n|\r|\n/g, '<br>');
+}
+
+function renderMessageBody(message: Message | null) {
+  if (!message) return '';
+  return sanitizeHtml(message.body_html) || renderPlainTextBody(message.body_text);
+}
+
 const isDraftFolder = computed(() => {
   const folder = (mailStore.currentFolder || '').toLowerCase();
   const folderName = mailStore.currentFolderName;
@@ -558,7 +591,7 @@ function handleWsMessage(data: any) {
       if (data.folder_counts) {
         mailStore.updateFolderCounts(data.folder_counts);
       }
-      if (!data.folder || data.folder === mailStore.currentFolder) {
+      if (foldersMatchForRefresh(data.folder || '', mailStore.currentFolder)) {
         if (selectedMessage.value || hasActiveFilter.value || searchKeyword.value) {
           pageCache.clear();
         } else {

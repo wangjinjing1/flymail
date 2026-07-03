@@ -2,6 +2,7 @@ import os
 import re
 import time
 import urllib.parse
+from html import unescape
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -23,9 +24,13 @@ logger = get_logger("services.outgoing_mail")
 def _html_to_text(body_html: str) -> str:
     if not body_html:
         return ""
-    text = re.sub(r"<br\s*/?>", "\n", body_html, flags=re.IGNORECASE)
-    text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<br\b[^>]*>", "\n", body_html, flags=re.IGNORECASE)
+    text = re.sub(r"</(p|div|h[1-6]|li|tr)\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<li\b[^>]*>", "- ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
+    text = unescape(text).replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
     return text.strip()
 
 
@@ -222,4 +227,6 @@ async def ensure_sent_message_cached(
 
     await sync_folder_to_cache(account, sent_folder)
     await sync_service.refresh_clients(account.id, sent_folder, user_uid=user_uid)
+    if sent_folder != "Sent":
+        await sync_service.refresh_clients(account.id, "Sent", user_uid=user_uid)
     return sent_folder

@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from email import message_from_bytes
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -75,6 +76,32 @@ def _load_outgoing_mail_module():
 
 
 class OutgoingMailTest(unittest.IsolatedAsyncioTestCase):
+    async def test_build_outgoing_message_preserves_html_and_plain_line_breaks(self):
+        outgoing_mail, _db_stub, _mail_cache_stub, _sync_stub = _load_outgoing_mail_module()
+        body_html = "<p>第一行</p><p>第二行<br>继续第二行</p><ul><li>列表项</li></ul>"
+
+        raw = outgoing_mail.build_outgoing_message_bytes(
+            from_email="sender@example.com",
+            to=["to@example.com"],
+            cc=[],
+            bcc=[],
+            subject="format",
+            body_html=body_html,
+            attachments=[],
+        )
+
+        msg = message_from_bytes(raw)
+        html_parts = []
+        plain_parts = []
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                html_parts.append(part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8"))
+            if part.get_content_type() == "text/plain":
+                plain_parts.append(part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8"))
+
+        self.assertEqual(html_parts, [body_html])
+        self.assertEqual(plain_parts, ["第一行\n第二行\n继续第二行\n- 列表项"])
+
     async def test_append_failure_caches_sent_message_locally(self):
         outgoing_mail, db_stub, mail_cache_stub, sync_stub = _load_outgoing_mail_module()
         account = Account(
@@ -113,9 +140,15 @@ class OutgoingMailTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cached.is_read)
         db_stub.upsert_folder_stats.assert_awaited_once_with("account-1", "[Gmail]/Sent Mail", 1, 0)
         self.assertEqual(mail_cache_stub.sync_folder_to_cache.await_count, 2)
-        sync_stub.sync_service.refresh_clients.assert_awaited_once_with(
+        self.assertEqual(sync_stub.sync_service.refresh_clients.await_count, 2)
+        sync_stub.sync_service.refresh_clients.assert_any_await(
             "account-1",
             "[Gmail]/Sent Mail",
+            user_uid="user-1",
+        )
+        sync_stub.sync_service.refresh_clients.assert_any_await(
+            "account-1",
+            "Sent",
             user_uid="user-1",
         )
 

@@ -41,6 +41,7 @@ def _load_messages_route_module():
     for name in (
         "adjust_account_folder_unread",
         "batch_delete_cached_messages",
+        "batch_update_is_read",
         "batch_update_cached_messages_read",
         "get_accounts",
         "get_cached_attachment",
